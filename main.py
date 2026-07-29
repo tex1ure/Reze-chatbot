@@ -331,6 +331,138 @@ ACTIONS = [
     "yawn", "yeet"
 ]
 
+OTAKUGIFS_ACTION_MAP = {
+    "angry": "angrystare",
+    "baka": "mad",
+    "blowkiss": "airkiss",
+    "bonk": "smack",
+    "bored": "sigh",
+    "carry": "hug",
+    "chase": "run",
+    "cheer": "celebrate",
+    "clap": "clap",
+    "cringe": "huh",
+    "feed": "nom",
+    "fuck": "slap",
+    "handshake": "brofist",
+    "highfive": "brofist",
+    "kabedon": "stare",
+    "kick": "punch",
+    "kill": "punch",
+    "lappillow": "cuddle",
+    "lurk": "peek",
+    "nod": "yes",
+    "nom": "nom",
+    "nope": "no",
+    "panic": "scared",
+    "peck": "kiss",
+    "poke": "poke",
+    "salute": "thumbsup",
+    "scream": "shout",
+    "shake": "headbang",
+    "shoot": "punch",
+    "sip": "sip",
+    "spin": "dance",
+    "tableflip": "mad",
+    "tailwhip": "nyah",
+    "think": "huh",
+    "threaten": "stare",
+    "yeet": "punch",
+}
+
+PURRBOT_ACTION_MAP = {
+    "bite": "bite",
+    "blush": "blush",
+    "cuddle": "cuddle",
+    "dance": "dance",
+    "feed": "feed",
+    "hug": "hug",
+    "kiss": "kiss",
+    "lick": "lick",
+    "nom": "feed",
+    "pat": "pat",
+    "poke": "poke",
+    "slap": "slap",
+    "smile": "smile",
+    "tickle": "tickle",
+}
+
+NEKOSLIFE_ACTION_MAP = {
+    "pat": "pat",
+    "hug": "hug",
+    "kiss": "kiss",
+    "slap": "slap",
+    "poke": "poke",
+    "feed": "feed",
+    "nom": "feed",
+    "cuddle": "cuddle",
+    "tickle": "tickle",
+    "smug": "smug",
+}
+
+async def fetch_action_gif(session: aiohttp.ClientSession, action: str):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    }
+
+    # Provider 1: Otakugifs
+    otaku_tag = OTAKUGIFS_ACTION_MAP.get(action, action)
+    try:
+        url = f"https://api.otakugifs.xyz/gif?reaction={otaku_tag}"
+        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if "url" in data and data["url"]:
+                    return data["url"], "otakugifs.xyz"
+    except Exception as e:
+        logger.debug(f"Otakugifs fetch failed for {action}: {e}")
+
+    # Provider 2: Purrbot
+    purr_tag = PURRBOT_ACTION_MAP.get(action)
+    if purr_tag:
+        try:
+            url = f"https://api.purrbot.site/v2/img/sfw/{purr_tag}/gif"
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if "link" in data and data["link"]:
+                        return data["link"], "purrbot.site"
+        except Exception as e:
+            logger.debug(f"Purrbot fetch failed for {action}: {e}")
+
+    # Provider 3: Nekos.life
+    nekos_tag = NEKOSLIFE_ACTION_MAP.get(action)
+    if nekos_tag:
+        try:
+            url = f"https://nekos.life/api/v2/img/{nekos_tag}"
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if "url" in data and data["url"]:
+                        return data["url"], "nekos.life"
+        except Exception as e:
+            logger.debug(f"Nekos.life fetch failed for {action}: {e}")
+
+    # Provider 4: Nekos.best (attempt with modern browser User-Agent)
+    try:
+        if action == "kill":
+            endpoint = "shoot"
+        elif action == "fuck":
+            endpoint = random.choice(["slap", "punch", "kick", "bonk", "yeet"])
+        else:
+            endpoint = action
+        url = f"https://nekos.best/api/v2/{endpoint}"
+        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if "results" in data and len(data["results"]) > 0:
+                    return data["results"][0]["url"], "nekos.best"
+    except Exception as e:
+        logger.debug(f"Nekos.best fetch failed for {action}: {e}")
+
+    return None, None
+
+
 
 ACTION_VERBS = {
     "angry": [
@@ -3916,7 +4048,7 @@ async def on_message(message):
                     if not character_found:
                         try:
                             url = f"https://nekos.best/api/v2/{command}?amount=2"
-                            headers = {"User-Agent": "MakimaChatbot/1.0"}
+                            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"}
                             async with aiohttp.ClientSession() as session:
                                 async with session.get(url, headers=headers) as resp:
                                     if resp.status == 200:
@@ -4244,7 +4376,7 @@ async def on_message(message):
                         try:
                             fallback_endpoint = "waifu" if command == "mkkf" else "husbando"
                             url = f"https://nekos.best/api/v2/{fallback_endpoint}?amount=3"
-                            headers = {"User-Agent": "MakimaChatbot/1.0"}
+                            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"}
                             async with aiohttp.ClientSession() as session:
                                 async with session.get(url, headers=headers) as resp:
                                     if resp.status == 200:
@@ -5168,59 +5300,21 @@ async def on_message(message):
                 if command == "random":
                     description += f" *(Random: {action})*"
 
-                # Fetch action GIF (using purrbot.site as a fallback for lick)
+                # Fetch action GIF using multi-provider helper (otakugifs, purrbot, nekos.life, nekos.best)
                 async with aiohttp.ClientSession() as session:
-                    try:
-                        headers = {"User-Agent": "MakimaChatbot/1.0"}
-                        if action == "lick":
-                            url = "https://api.purrbot.site/v2/img/sfw/lick/gif"
-                        elif action == "kill":
-                            url = "https://nekos.best/api/v2/shoot"
-                        elif action == "fuck":
-                            # SFW comical physical beatdown fallback
-                            fuck_fallback = random.choice(["slap", "punch", "kick", "bonk", "yeet"])
-                            url = f"https://nekos.best/api/v2/{fuck_fallback}"
-                        elif action in ["nosebleed", "nuzzle", "drool"]:
-                            url = f"https://api.otakugifs.xyz/gif?reaction={action}"
-                        else:
-                            url = f"https://nekos.best/api/v2/{action}"
-
-                        async with session.get(url, headers=headers, timeout=10) as resp:
-                            if resp.status == 200:
-                                data = await resp.json()
-                                if action == "lick":
-                                    gif_url = data["link"]
-                                elif action in ["nosebleed", "nuzzle", "drool"]:
-                                    gif_url = data["url"]
-                                else:
-                                    gif_url = data["results"][0]["url"]
-
-                                embed = discord.Embed(
-                                    description=description,
-                                    color=discord.Color.from_rgb(224, 187, 228) # Sweet light lavender
-                                )
-                                embed.set_image(url=gif_url)
-                                embed.set_footer(text="Reze bot made by texture (syfmyorii)")
-                                sent_msg = await message.channel.send(embed=embed)
-                                if sent_msg:
-                                    command_output_message_ids.add(sent_msg.id)
-                            else:
-                                if action == "lick":
-                                    api_name = "purrbot.site"
-                                elif action in ["nosebleed", "nuzzle", "drool"]:
-                                    api_name = "otakugifs.xyz"
-                                else:
-                                    api_name = "nekos.best"
-                                await message.reply(f"couldn't fetch the gif... {api_name} returned {resp.status} 😭")
-                    except Exception as e:
-                        logger.error(f"Error fetching action GIF: {e}")
-                        if action == "lick":
-                            api_name = "purrbot.site"
-                        elif action in ["nosebleed", "nuzzle", "drool"]:
-                            api_name = "otakugifs.xyz"
-                        else:
-                            api_name = "nekos.best"
-                        await message.reply(f"{api_name} api is acting up, try again later or smth 🙄")
+                    gif_url, provider = await fetch_action_gif(session, action)
+                    if gif_url:
+                        embed = discord.Embed(
+                            description=description,
+                            color=discord.Color.from_rgb(224, 187, 228) # Sweet light lavender
+                        )
+                        embed.set_image(url=gif_url)
+                        embed.set_footer(text="Reze bot made by texture (syfmyorii)")
+                        sent_msg = await message.channel.send(embed=embed)
+                        if sent_msg:
+                            command_output_message_ids.add(sent_msg.id)
+                    else:
+                        await message.reply(f"couldn't fetch the gif right now... try again in a bit 😭")
                 return
             else:
                 await message.reply("huh? what command is that... type $help or get out 🙄")

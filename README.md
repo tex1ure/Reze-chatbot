@@ -1,71 +1,214 @@
-# Reze AI Chatbot
+# Reze / Makima Bot
 
-## Overview
-This repository contains a Python-based AI chatbot application. The bot is heavily equipped with a vast local database of Reze reaction images and memes. It is designed to process conversational inputs through an external AI handler, manage user interactions via a database, and dynamically serve specific image assets based on the chat context. 
+a feature-packed discord bot built with discord.py, motor (mongodb), and flask. handles natural AI chat across multiple providers, simulated human typing behavior, meme generators, interactive mini-games, an e-family system with visual tree rendering, custom anime action emotes, and a web admin dashboard.
 
-The project is pre-configured for continuous hosting and cloud deployment.
+---
 
-## Architecture and Core Files
+## Features Overview
 
-The repository is structured to separate the AI logic, database management, and deployment protocols into distinct modules:
+### Multi-Provider AI Engine (`ai_handler.py`)
+the bot doesn't rely on just one AI provider. it includes built-in failovers and key rotators:
+* **Google GenAI**: supports gemini and gemma models (`gemma-4-31b-it`) with multi-key rotation.
+* **Groq API**: fallback to `llama-3.3-70b-versatile` with key rotation.
+* **Cerebras API**: ultra-fast inference fallback using `llama-3.3-70b`.
+* **SiliconFlow / SiliconCloud**: fallback support for models like `DeepSeek-V3` and `Qwen2.5-72B`.
+* **Google Search Integration**: performs live web searches to answer real-time questions.
+* **Smart Memory Compression**: automatically summarizes old channel history into MongoDB documents when conversation length exceeds threshold.
+* **Dynamic Mood System**: shifts between `NORMAL`, `YAPPING`, `LEWD`, and `BORED` modes.
+* **Absence & Return Detection**: remembers when users return after days away and brings it up.
+* **Grudge Tracking**: keeps track of annoying user behavior to apply temporary cool-downs or roasts.
 
-*   `main.py`: The entry point and core loop of the chatbot. This script handles the initialization, connects to the messaging platform's API, and routes incoming messages to the appropriate handlers.
-*   `ai_handler.py`: The brain of the operation. This module intercepts user prompts and processes them through an external LLM API to generate in-character conversational responses.
-*   `db.py`: The database management module. It handles reading and writing user data, maintaining context history, and ensuring the bot retains memory across sessions and restarts.
-*   `keep_alive.py`: A lightweight web server script (typically utilizing Flask) designed to bind to a port. This is a pragmatic solution used to keep the bot awake on free-tier hosting platforms by allowing an external service to ping it continuously.
-*   `Procfile`: Contains the deployment directive (`web: python main.py`). This indicates the bot is ready to be deployed on container-based Platform-as-a-Service (PaaS) providers.
-*   `requirements.txt`: The dependency ledger, listing all required Python libraries.
-*   `assets/memes/`: A local storage directory stockpiled with Reze reaction images. The assets cover a wide spectrum of triggers (e.g., annoyed, sleepy, excited, psycho) as well as several NSFW categories. The bot pulls from this directory to send image attachments during specific conversational triggers.
+### Simulated Human Behavior
+* **Typing delays**: realistic typing speeds and hesitation pauses before replying.
+* **Organic typos**: introduces typos (normal and drunk mode chances) and sends follow-up corrections.
+* **Message edits & deletions**: randomly edits or deletes recent messages.
+* **Left-on-read reactions**: places subtle reactions when ignoring or taking time to respond.
+* **Eavesdropping & wrong-chat texts**: randomly chimes in or sends fake wrong-chat snippets.
+* **Dynamic status schedules**: updates Discord status based on an IST hourly schedule.
 
-## Setup and Installation
+---
 
-To run this project locally or prepare it for deployment, follow these steps:
+## Command Reference (Prefix: `$`)
 
-1.  **Environment Preparation**
-    Ensure Python 3.x is installed on your system. It is highly recommended to use a virtual environment to avoid dependency conflicts.
-    ```bash
-    python -m venv venv
-    source venv/bin/activate  # On Windows, use: venv\Scripts\activate
-    ```
+### General & Lookup
+* `$anime [query]` - search MyAnimeList for anime info.
+* `$manga [query]` - search MyAnimeList for manga info.
+* `$movie [query]` / `$show [query]` - fetch IMDb/OMDb details.
+* `$avatar [@user]` / `$av` - grab a user's avatar.
+* `$translate [lang] [text]` / `$tl` - translate text or replied messages.
+* `$weather [city]` - check real-time weather.
+* `$ping` - check bot response latency.
+* `$uptime` - view bot uptime.
+* `$server` - display server info.
+* `$poll [question] | [opt1] | [opt2]` - create interactive reaction polls.
 
-2.  **Install Dependencies**
-    Install the necessary packages from the requirements ledger.
-    ```bash
-    pip install -r requirements.txt
-    ```
+### Interactive Games & Fun
+* `$akinator` - play Akinator directly in discord chat using buttons.
+* `$choose [opt1 | opt2]` - let the bot pick between choices.
+* `$quote [@user] [text]` - generate a cinematic quote card image.
+* `$truth` / `$dare` - play Truth or Dare powered by Llama 3.3.
+* `$wyr` / `$wouldyourather` - play Would You Rather polls.
+* `$gay [@user]` / `$lesbian [@user]` - check fun percentage ratings.
+* `$waifu` / `$husbando` - fetch random anime characters with voting.
+* `$mkkf` / `$mkkm` - play Marry, Kiss, Kill (female/male).
+* `$villain` - battle two iconic anime villains.
+* `$cat` / `$dog` - get random animal pictures.
+* `$confess [text]` - send an anonymous confession (DM only).
 
-3.  **Configure Environment Variables**
-    Create a `.env` file in the root directory. You will need to provide the necessary API keys for your setup to function. This typically includes:
-    *   The Bot Token for your target platform.
-    *   The API Key for your AI provider.
+### Mini-Games (`games.py`)
+* **Russian Roulette**: spin the cylinder and pull the trigger with interactive buttons.
+* **Blackjack**: hit or stand in a classic card game vs the bot.
+* **Rock-Paper-Scissors**: play solo vs bot or challenge server members in multiplayer.
+* **Tic-Tac-Toe**: 2-player interactive grid battle.
+* **Anime Trivia**: answer questions fetched from OpenTDB.
+* **Word Scramble**: unscramble word prompts against the clock.
 
-4.  **Database Initialization**
-    If `db.py` requires initial schema setup, execute that module first or ensure `main.py` handles the table creation on its initial run.
+### Meme Generator Engine
+* `$wanted [@user]` / `$bounty` - create a One Piece wanted poster.
+* `$jail [@user]` - put a user behind photorealistic jail bars.
+* `$rip [@user] [reason]` - generate a gravestone meme.
+* `$gandhi [text]` / `$fakequote` - generate a fake quote banner on a Gandhi background.
+* `$simp [@user]` - issue a Certified Simp Card.
+* `$wasted [@user]` - apply a GTA sepia red Wasted overlay.
+* `$trashcan [@user]` - drop an avatar into the trashcan.
+* `$impersonate [@user] [text]` - mimic someone using temporary webhooks.
+* `$ship [@user]` - calculate love compatibility and generate a ship card image.
 
-5.  **Execution**
-    Launch the bot.
-    ```bash
-    python main.py
-    ```
+### Action Emotes (`$[action] [@user]`)
+* **Affection**: `pat`, `hug`, `kiss`, `cuddle`, `handhold`, `feed`, `tickle`, `highfive`, `cheer`, `wink`, `smile`, `happy`, `blowkiss`
+* **Expression**: `blush`, `cry`, `cringe`, `confused`, `facepalm`, `bored`, `tired`, `sleep`, `sad`, `scream`, `panic`, `yawn`, `surprised`, `chase`, `run`, `handshake`, `tailwhip`, `nope`
+* **Playful**: `poke`, `nom`, `lick`, `bleh`, `wave`, `dance`, `smug`, `shrug`, `nod`, `thumbsup`, `lurk`, `think`, `stare`
+* **Chaos**: `slap`, `punch`, `kick`, `yeet`, `bite`, `bonk`, `threaten`, `angry`, `baka`
 
-## Per-Server Configuration
+### E-Family System
+* `$marry [@user]` - propose marriage to another member.
+* `$adopt [@user]` - adopt a member as your child.
+* `$divorce` - divorce your current spouse.
+* `$disown [@user]` - disown a child.
+* `$abandon [@user]` - abandon a parent.
+* `$runaway` - leave home and remove parents.
+* `$disownall` - disown all children.
+* `$family [@user]` - generate and view an image of a user's family tree graph.
 
-If deploying this bot across multiple servers (guilds), server administrators must configure the following settings upon inviting the bot to ensure proper functionality and prevent spam:
+### Server Config (Slash Commands)
+* `/setup` - view current server configuration.
+* `/setrole [type] [role]` - assign male, female, hinglish, or lewd roles.
+* `/setchannel [type] [channel]` - assign target, story, nsfw, or confession channels.
+* `/resetconfig` - reset server config back to default settings.
+* `/nsfw` - toggle NSFW mode (DM only).
 
-*   **Channel Whitelisting:** By default, the bot should be restricted from reading all channels. Use the designated admin commands to set specific `allowed_channels` where the bot is permitted to read and respond to messages.
-*   **Context Isolation:** The database (`db.py`) is structured to separate conversation memory by `server_id` and `channel_id`. If memory appears to bleed between servers, ensure database partitions are correctly mapped.
-*   **Meme Cooldowns:** The bot utilizes assets from the `assets/memes/` folder. To prevent chat flooding, configure the image trigger probability or set strict time-based cooldowns per server.
-*   **Admin Roles:** Ensure the correct server roles are assigned so that only authorized users can wipe the bot's memory context or change its operational channels.
+---
 
-## Deployment Strategies
+## Web Dashboard (`dashboard.py`)
 
-You have two primary deployment methods built into this repository:
+includes a built-in Flask REST API for remote management:
+* authenticated session access using `DASHBOARD_PASSWORD`.
+* update live config values (`rate_limit_count`, `temperature`, `model`, probabilities) without bot restarts.
+* sync and monitor MongoDB user relationship data and channel memories.
 
-**Method 1: Containerized Cloud Hosting**
-The inclusion of the `Procfile` allows for seamless deployment to PaaS providers. Simply push the repository to your host, configure your environment variables in their respective dashboards, and the host will automatically execute `python main.py` as the web worker.
+---
 
-**Method 2: Always-On Services**
-If you are hosting this on a platform that puts inactive processes to sleep, the `keep_alive.py` file is your failsafe. Ensure `main.py` imports and runs the `keep_alive` function. Then, set up an external service to ping the provided web address every 5 minutes.
+## File Structure
+
+```
+.
+├── main.py              # entry point, commands, event listeners, family tree image renderer
+├── ai_handler.py        # multi-provider AI logic (Gemini, Groq, Cerebras, SiliconFlow) & search
+├── bot_config.py        # thread-safe mutable configuration manager
+├── db.py                # async MongoDB manager (Motor)
+├── games.py             # mini-game UI views & logic
+├── dashboard.py         # Flask REST API blueprint
+├── keep_alive.py        # lightweight Flask ping server
+├── requirements.txt     # python packages
+├── Dockerfile           # container build script
+├── compose.yaml         # docker compose definition
+├── Procfile             # PaaS deployment directive
+├── README.Docker.md     # docker setup instructions
+├── LICENSE              # custom non-commercial software license
+└── assets/              # meme overlays, reaction images, and custom cards
+```
+
+---
+
+## Environment Setup
+
+Copy `.env.example` to `.env` and fill in credentials:
+
+```env
+DISCORD_TOKEN=your_discord_bot_token
+APPLICATION_ID=your_application_id
+
+# AI Providers (comma-separated for key rotation)
+GEMINI_API_KEY=your_gemini_key_1,your_gemini_key_2
+GROQ_API_KEY=your_groq_key
+CEREBRAS_API_KEY=your_cerebras_key
+SILICON_API=your_siliconflow_key
+
+# Database
+MONGODB_URI=mongodb+srv://user:pass@cluster.mongodb.net/?appName=RezeBot
+
+# Dashboard & External APIs
+DASHBOARD_PASSWORD=your_dashboard_password
+OMDB_API_KEY=your_omdb_key
+```
+
+---
+
+## Local Development
+
+```bash
+# clone repository
+git clone https://github.com/your-username/Makima-chatbot.git
+cd Makima-chatbot
+
+# create virtual environment
+python -m venv venv
+source venv/bin/activate  # venv\Scripts\activate on Windows
+
+# install packages
+pip install -r requirements.txt
+
+# run bot
+python main.py
+```
+
+---
+
+## Docker Deployment
+
+```bash
+# launch container
+docker compose up -d --build
+
+# check logs
+docker compose logs -f
+```
+
+For full container setup instructions, check [README.Docker.md](file:///b:/Discord%20bots/Makima-chatbot/README.Docker.md).
+
+---
+
+## Config Overview (`bot_config.py`)
+
+| Parameter | Default | Description |
+| :--- | :--- | :--- |
+| `rate_limit_count` | `5` | max messages allowed per window |
+| `rate_limit_window` | `40` | rate limit window in seconds |
+| `temperature` | `0.9` | AI sampling temperature |
+| `model` | `gemma-4-31b-it` | primary model identifier |
+| `memory_compress_threshold` | `20` | message count trigger for context compression |
+| `left_on_read_react_chance` | `0.30` | chance of dropping reaction when lagging |
+| `typo_chance_normal` | `0.05` | typo probability in normal mode |
+| `unprompted_enabled` | `True` | allow bot to send random messages in quiet channels |
+
+---
+
+## License
+
+This project is licensed under a custom non-commercial license. You are free to use, modify, and host this bot for personal or educational use. Commercial use or selling access to this bot without permission is prohibited. See the [LICENSE](file:///b:/Discord%20bots/Makima-chatbot/LICENSE) file for details.
+
+---
 
 ## Disclaimer
-Review the contents of your `assets/memes/` directory before deploying this bot to public servers. Ensure you are not violating the Terms of Service of your messaging platform or your AI provider by serving the NSFW assets included in this repository.
+
+Check images in `assets/memes/` before hosting publicly. Follow Discord's TOS and AI provider usage policies.

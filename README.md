@@ -203,6 +203,35 @@ For full container setup instructions, check [README.Docker.md](file:///b:/Disco
 
 ---
 
+## Privacy, Data Handling & AI Policy
+
+When hosting or interacting with this bot, user data and conversation context are handled as follows:
+
+### What Data Is Processed & Stored
+* **Discord Identifiers**: User IDs, Username tags, Server (Guild) IDs, and Channel IDs are stored in MongoDB to manage server configurations, channel bindings, and the family tree system.
+* **Conversation History & Memory**: Messages directed at the bot (via mentions, replies, or inside designated target channels) are temporarily cached and compressed in MongoDB to maintain conversational coherence across turns.
+* **Game & AFK State**: Transient data for mini-games, polls, and AFK status.
+
+### Third-Party AI Providers & Model Training
+This bot connects to external LLM APIs to generate conversational replies. Data privacy depends on the API keys configured by the host:
+* **Google Gemini API**:
+  * **Free Tier (Google AI Studio)**: Prompts and generated content may be logged, reviewed by human reviewers, and used by Google to improve and train models under Google's consumer/free API terms.
+  * **Paid Tier (Google Cloud / Vertex AI / Pay-As-You-Go)**: Data is **not** used to train models and is processed under enterprise data governance terms.
+* **Groq Cloud API**: Groq's terms state that user inputs and model outputs via their API are **not used for model training**.
+* **Cerebras Cloud API**: Inference API requests are **not used for model training**.
+* **SiliconFlow**: Standard enterprise API terms apply without model training on customer inference data.
+
+> [!TIP]
+> If data privacy and zero-training guarantees are required for your server, use **Groq**, **Cerebras**, or **Paid Google Gemini API keys**.
+
+### Self-Hosting Compliance & Best Practices
+If you host this bot publicly or for a community, you are responsible for complying with the [Discord Developer Terms of Service](https://discord.com/developers/docs/policies-and-agreements/developer-terms-of-service) and [Discord Developer Policy](https://discord.com/developers/docs/policies-and-agreements/developer-policy):
+1. **Designated Channels**: Restrict AI chat processing to specific channels using `/setchannel target` to ensure users are aware where AI listening occurs.
+2. **Privacy Disclosures**: Provide your server members with a link to the [Privacy Policy](reze-docs/privacy.html).
+3. **Data Erasure**: Server owners can wipe server configuration caches at any time using `/resetconfig`.
+
+---
+
 ## License
 
 This project is licensed under a custom non-commercial license. You are free to use, modify, and host this bot for personal or educational use. Commercial use or selling access to this bot without permission is prohibited. See the [LICENSE](file:///b:/Discord%20bots/Makima-chatbot/LICENSE) file for details.
@@ -211,4 +240,6 @@ This project is licensed under a custom non-commercial license. You are free to 
 
 ## Disclaimer
 
-Check images in `assets/memes/` before hosting publicly. Follow Discord's TOS and AI provider usage policies.
+* Review meme templates and assets in `assets/memes/` before hosting publicly.
+* Ensure your deployment strictly complies with Discord's Terms of Service, Community Guidelines, and the Terms of Service of your chosen AI API providers.
+

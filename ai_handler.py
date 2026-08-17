@@ -30,7 +30,7 @@ class AIHandler:
         # Initialize clients for each key  
         self.clients = [genai.Client(api_key=key) for key in self.api_keys]  
         self.current_key_index = 0  
-        self.model = "gemma-4-31b-it"
+        self.model = "gemini-3.5-flash-lite"
 
         # Initialize Groq client settings
         raw_groq_keys = os.getenv("GROQ_API_KEY")

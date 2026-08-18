@@ -23,6 +23,7 @@ import glob
 import re
 import aiohttp
 import io
+import urllib
 import urllib.parse
 from datetime import timedelta, datetime, timezone
 from keep_alive import keep_alive
@@ -6456,6 +6457,9 @@ async def on_message(message):
                                     has_typo = True
 
 
+                if final_sentence:
+                    final_sentence = final_sentence[:1950]
+
                 if i == 0:
                     try:
                         if meme_to_send:
@@ -6464,7 +6468,7 @@ async def on_message(message):
                         else:
                             sent_msg = await message.reply(final_sentence)
                     except discord.errors.HTTPException as e:
-                        if e.code == 50035: # Unknown Message (deleted)
+                        if e.code in (50035, 10008): # Unknown Message or deleted/invalid body
                             if meme_to_send:
                                 sent_msg = await message.channel.send(final_sentence, file=meme_to_send)
                                 meme_to_send = None

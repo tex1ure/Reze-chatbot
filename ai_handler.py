@@ -39,7 +39,8 @@ class AIHandler:
         else:
             self.groq_api_keys = []
         self.current_groq_key_index = 0
-        self.groq_model = "llama-3.3-70b-versatile"
+        self.groq_model = "openai/gpt-oss-120b"
+        self.groq_fallback_models = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.6-27b"]
 
         # Initialize Cerebras settings
         raw_cerebras_keys = os.getenv("CEREBRAS_API_KEY")
@@ -48,6 +49,8 @@ class AIHandler:
         else:
             self.cerebras_keys = []
         self.current_cerebras_key_index = 0
+        self.cerebras_model = "gpt-oss-120b"
+        self.cerebras_models = ["gpt-oss-120b", "gemma-4-31b"]
 
         # Initialize SiliconFlow settings
         raw_silicon_keys = os.getenv("SILICON_API")
@@ -56,6 +59,7 @@ class AIHandler:
         else:
             self.silicon_keys = []
         self.current_silicon_key_index = 0
+        self.silicon_disabled_until = 0
         self.silicon_models = [
             "deepseek-ai/DeepSeek-V4-Flash",
             "zai-org/GLM-5.2",
@@ -64,6 +68,24 @@ class AIHandler:
             "deepseek-ai/DeepSeek-V3.2",
             "deepseek-ai/DeepSeek-V4-Pro",
             "zai-org/GLM-5V-Turbo"
+        ]
+
+        # Initialize Cloudflare Workers AI settings
+        raw_cf_keys = os.getenv("CLOUDFLARE_API_TOKEN")
+        if raw_cf_keys:
+            self.cloudflare_keys = [k.strip() for k in raw_cf_keys.split(",") if k.strip()]
+        else:
+            self.cloudflare_keys = []
+        self.cloudflare_account_id = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
+        self.current_cloudflare_key_index = 0
+        self.cloudflare_models = [
+            "@cf/qwen/qwen3.8-27b",
+            "@cf/qwen/qwen2.5-coder-32b-instruct",
+            "@cf/meta/llama-3.1-70b-instruct",
+            "alibaba/qwen3.5-397b-a17b",
+            "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b",
+            "google/gemini-3.7-flash",
+            "@cf/meta/llama-3.2-3b-instruct"
         ]
 
 
@@ -462,6 +484,17 @@ Use it when you want to rot in bed, go to sleep, or when you are just done talki
         return prompt
 
     def _sanitize_output(self, text: str) -> str:
+        if not text:
+            return ""
+        text = text.strip('*\"\' ')
+        
+        # Strip thinking/reasoning tags from models (e.g. Qwen, DeepSeek, GLM, etc.)
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<thought>.*?</thought>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"\[THINK\].*?\[/THINK\]", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"```thought.*?```", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"^<think>.*", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"^(?:Thinking Process|Thought|Reasoning):\s*.*?\n\n", "", text, flags=re.DOTALL | re.IGNORECASE)
         text = text.strip('*\"\' ')
         
         # Strip AI-like prefixes
@@ -634,7 +667,8 @@ Use it when you want to rot in bed, go to sleep, or when you are just done talki
         payload = {
             "model": model_name,
             "messages": messages,
-            "temperature": temperature
+            "temperature": temperature,
+            "max_tokens": 512
         }
         
         for attempt in range(len(self.groq_api_keys)):
@@ -648,12 +682,18 @@ Use it when you want to rot in bed, go to sleep, or when you are just done talki
                     async with session.post(url, headers=headers, json=payload, timeout=10) as resp:
                         if resp.status == 200:
                             data = await resp.json()
-                            return data["choices"][0]["message"]["content"].strip()
+                            if "choices" in data and len(data["choices"]) > 0:
+                                return data["choices"][0]["message"]["content"].strip()
+                            else:
+                                raise ValueError(f"Groq returned empty choices: {data}")
                         elif resp.status == 429:
                             print(f"Groq API Key #{self.current_groq_key_index + 1} rate limited. Rotating.")
                             self.current_groq_key_index = (self.current_groq_key_index + 1) % len(self.groq_api_keys)
                         else:
-                            data = await resp.json()
+                            try:
+                                data = await resp.json()
+                            except Exception:
+                                data = await resp.text()
                             print(f"Groq API Error (Status {resp.status}): {data}")
                             self.current_groq_key_index = (self.current_groq_key_index + 1) % len(self.groq_api_keys)
             except Exception as e:
@@ -662,7 +702,7 @@ Use it when you want to rot in bed, go to sleep, or when you are just done talki
                 
         raise RuntimeError("All Groq API keys failed.")
 
-    async def _get_cerebras_response(self, messages: list, model: str = "zai-glm-4.7", temperature: float = 1.05) -> str:
+    async def _get_cerebras_response(self, messages: list, model: str = "gpt-oss-120b", temperature: float = 1.05) -> str:
         """Call Cerebras API with standard chat completions and key rotation."""
         if not self.cerebras_keys:
             raise ValueError("No Cerebras API keys configured in .env")
@@ -671,7 +711,8 @@ Use it when you want to rot in bed, go to sleep, or when you are just done talki
         payload = {
             "model": model,
             "messages": messages,
-            "temperature": temperature
+            "temperature": temperature,
+            "max_tokens": 512
         }
         
         for attempt in range(len(self.cerebras_keys)):
@@ -709,13 +750,16 @@ Use it when you want to rot in bed, go to sleep, or when you are just done talki
         """Call SiliconFlow API with standard chat completions and key rotation."""
         if not self.silicon_keys:
             raise ValueError("No SiliconFlow API keys configured in .env")
+        if time.time() < self.silicon_disabled_until:
+            raise RuntimeError("SiliconFlow is temporarily paused due to insufficient balance.")
             
         url = "https://api.siliconflow.com/v1/chat/completions"
         model_name = model if model else self.silicon_models[0]
         payload = {
             "model": model_name,
             "messages": messages,
-            "temperature": temperature
+            "temperature": temperature,
+            "max_tokens": 512
         }
         
         for attempt in range(len(self.silicon_keys)):
@@ -746,15 +790,88 @@ Use it when you want to rot in bed, go to sleep, or when you are just done talki
                                 err_data = await resp.json()
                             except:
                                 err_data = await resp.text()
+                            err_str = str(err_data).lower()
+                            if resp.status == 403 or "insufficient" in err_str or "30001" in err_str:
+                                print(f"SiliconFlow account balance insufficient. Pausing SiliconFlow for 10 minutes.")
+                                self.silicon_disabled_until = time.time() + 600
+                                raise RuntimeError("SiliconFlow insufficient balance")
                             print(f"SiliconFlow API Error (Status {resp.status}): {err_data}. Rotating key.")
                             if self.current_silicon_key_index == idx:
                                 self.current_silicon_key_index = (idx + 1) % len(self.silicon_keys)
             except Exception as e:
+                if "insufficient" in str(e).lower():
+                    raise
                 print(f"SiliconFlow request failed with Key #{idx + 1}: {e}. Rotating key.")
                 if self.current_silicon_key_index == idx:
                     self.current_silicon_key_index = (idx + 1) % len(self.silicon_keys)
                 
         raise RuntimeError("All SiliconFlow API keys failed.")
+
+    async def _get_cloudflare_response(self, messages: list, model: str = None, temperature: float = 1.0) -> str:
+        """Call Cloudflare Workers AI API with key rotation and fallback."""
+        if not self.cloudflare_keys or not self.cloudflare_account_id:
+            raise ValueError("No Cloudflare API keys or Account ID configured.")
+            
+        model_name = model if model else self.cloudflare_models[0]
+        url = f"https://api.cloudflare.com/client/v4/accounts/{self.cloudflare_account_id}/ai/v1/chat/completions"
+        is_reasoning = any(x in model_name.lower() for x in ["glm", "deepseek", "r1"])
+        max_tokens = 1536 if is_reasoning else 512
+        payload = {
+            "model": model_name,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens
+        }
+        
+        for attempt in range(len(self.cloudflare_keys)):
+            key = self.cloudflare_keys[self.current_cloudflare_key_index]
+            headers = {
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json"
+            }
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, headers=headers, json=payload, timeout=20) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if "choices" in data and len(data["choices"]) > 0:
+                                msg = data["choices"][0]["message"]
+                                raw_text = msg.get("content")
+                                if raw_text and raw_text.strip():
+                                    return raw_text.strip()
+                                raise ValueError(f"Cloudflare model {model_name} returned empty content (finish_reason: {data['choices'][0].get('finish_reason')})")
+                            elif "result" in data and "response" in data["result"]:
+                                raw_text = data["result"]["response"]
+                                if raw_text and raw_text.strip():
+                                    return raw_text.strip()
+                                raise ValueError(f"Cloudflare model {model_name} returned empty response")
+                            else:
+                                raise ValueError(f"Cloudflare returned empty choices: {data}")
+                        elif resp.status in (400, 402, 404):
+                            try:
+                                err_data = await resp.json()
+                            except:
+                                err_data = await resp.text()
+                            raise ValueError(f"Cloudflare model {model_name} unavailable ({resp.status}): {err_data}")
+                        elif resp.status in (429, 500, 503):
+                            print(f"Cloudflare API Key #{self.current_cloudflare_key_index + 1} rate limited/failed. Rotating.")
+                            self.current_cloudflare_key_index = (self.current_cloudflare_key_index + 1) % len(self.cloudflare_keys)
+                        else:
+                            try:
+                                err_data = await resp.json()
+                            except:
+                                err_data = await resp.text()
+                            print(f"Cloudflare API Error (Status {resp.status}): {err_data}. Rotating.")
+                            self.current_cloudflare_key_index = (self.current_cloudflare_key_index + 1) % len(self.cloudflare_keys)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                if "unavailable" in str(e):
+                    raise
+                print(f"Cloudflare request failed with Key #{self.current_cloudflare_key_index + 1}: {e}. Rotating.")
+                self.current_cloudflare_key_index = (self.current_cloudflare_key_index + 1) % len(self.cloudflare_keys)
+                
+        raise RuntimeError("All Cloudflare API keys failed.")
 
     async def compress_memory(self, channel_id: str, old_summary: str, messages_to_compress: list) -> str:
         """Takes an old summary and a chunk of old messages, and returns a compressed long-term summary."""
@@ -799,7 +916,7 @@ INSTRUCTIONS:
                 model=self.model,
                 contents=prompt,
                 config=types.GenerateContentConfig(
-                    thinking_config=types.ThinkingConfig(thinking_level="LOW"),
+                    thinking_config=types.ThinkingConfig(thinking_level="MINIMAL"),
                     safety_settings=self.safety_settings
                 )
             )
@@ -844,7 +961,7 @@ INSTRUCTIONS:
                 model=self.model,
                 contents=prompt,
                 config=types.GenerateContentConfig(
-                    thinking_config=types.ThinkingConfig(thinking_level="LOW"),
+                    thinking_config=types.ThinkingConfig(thinking_level="MINIMAL"),
                     safety_settings=self.safety_settings
                 )
             )
@@ -865,8 +982,19 @@ INSTRUCTIONS:
             )
         except Exception as e:
             error_msg = str(e).lower()
-            if "thinking" in error_msg and ("not supported" in error_msg or "400" in error_msg or "invalid" in error_msg):
+            if "thinking" in error_msg and ("not supported" in error_msg or "400" in error_msg or "invalid" in error_msg or "argument" in error_msg):
                 if config and hasattr(config, "thinking_config") and config.thinking_config is not None:
+                    # Try budget 0 fallback
+                    try:
+                        config.thinking_config = types.ThinkingConfig(thinking_budget=0)
+                        return await client.aio.models.generate_content(
+                            model=model,
+                            contents=contents,
+                            config=config
+                        )
+                    except Exception:
+                        pass
+                    # Try without thinking config
                     print(f"Thinking config not supported for model {model}. Retrying without it.")
                     config.thinking_config = None
                     return await client.aio.models.generate_content(
@@ -932,8 +1060,31 @@ INSTRUCTIONS:
         current_parts.append(types.Part.from_text(text=user_message))  
         contents.append(types.Content(role="user", parts=current_parts))  
 
-        # Try SiliconFlow first
-        if self.silicon_keys:
+        # 1. Try Cloudflare Workers AI first as PRIMARY provider (if no attachments)
+        if not attachments and self.cloudflare_keys and self.cloudflare_account_id:
+            for cf_model in self.cloudflare_models:
+                try:
+                    cf_messages = []
+                    cf_messages.append({"role": "system", "content": full_system_instruction})
+                    if history:
+                        for msg in history:
+                            role = "user" if msg["role"] == "user" else "assistant"
+                            cf_messages.append({"role": role, "content": msg["content"]})
+                    cf_messages.append({"role": "user", "content": user_message})
+                    
+                    raw_text = await self._get_cloudflare_response(cf_messages, model=cf_model, temperature=1.0)
+                    if re.search(r'\[REPLYING TO|\[[^\]]+\]\s*:', raw_text, re.IGNORECASE):
+                        raise ValueError("Model echoed transcript formatting")
+                    
+                    sanitized_text = self._sanitize_output(raw_text)
+                    if sanitized_text and "as an ai" not in sanitized_text:
+                        self._update_memory(channel_id, sanitized_text)
+                        return sanitized_text
+                except Exception as e:
+                    print(f"Cloudflare model {cf_model} failed, trying next: {e}")
+
+        # 2. Try SiliconFlow next
+        if self.silicon_keys and time.time() > self.silicon_disabled_until:
             try:
                 silicon_messages = []
                 silicon_messages.append({"role": "system", "content": full_system_instruction})
@@ -969,8 +1120,12 @@ INSTRUCTIONS:
 
                 # Define concurrent query for SiliconFlow models
                 async def query_silicon_model(model_name):
+                    if time.time() < self.silicon_disabled_until:
+                        raise RuntimeError("SiliconFlow balance insufficient")
                     num_keys = len(self.silicon_keys)
                     for attempt in range(num_keys):
+                        if time.time() < self.silicon_disabled_until:
+                            raise RuntimeError("SiliconFlow balance insufficient")
                         idx = (self.current_silicon_key_index + attempt) % num_keys
                         key = self.silicon_keys[idx]
                         url = "https://api.siliconflow.com/v1/chat/completions"
@@ -982,7 +1137,8 @@ INSTRUCTIONS:
                         payload = {
                             "model": model_name,
                             "messages": silicon_messages,
-                            "temperature": temp
+                            "temperature": temp,
+                            "max_tokens": 512
                         }
                         try:
                             async with aiohttp.ClientSession() as session:
@@ -1012,6 +1168,10 @@ INSTRUCTIONS:
                                             self.current_silicon_key_index = (idx + 1) % num_keys
                                     else:
                                         err_data = await resp.text()
+                                        if resp.status == 403 or "insufficient" in err_data.lower() or "30001" in err_data:
+                                            print(f"SiliconFlow insufficient balance (status {resp.status}). Pausing SiliconFlow for 10 minutes.")
+                                            self.silicon_disabled_until = time.time() + 600
+                                            raise RuntimeError("SiliconFlow insufficient balance")
                                         print(f"SiliconFlow error (status {resp.status}) for model {model_name}: {err_data}")
                                         sys.stdout.flush()
                                         if self.current_silicon_key_index == idx:
@@ -1019,6 +1179,8 @@ INSTRUCTIONS:
                         except asyncio.CancelledError:
                             raise
                         except Exception as e:
+                            if "insufficient" in str(e).lower():
+                                raise
                             print(f"SiliconFlow attempt failed for model {model_name} with Key #{idx + 1}: {e}")
                             sys.stdout.flush()
                             if self.current_silicon_key_index == idx:
@@ -1045,6 +1207,11 @@ INSTRUCTIONS:
                     except asyncio.CancelledError:
                         pass
                     except Exception as e:
+                        if "insufficient" in str(e).lower():
+                            for t in silicon_tasks:
+                                if not t.done():
+                                    t.cancel()
+                            break
                         print(f"Concurrent SiliconFlow model task failed: {e}")
 
                 if silicon_result:
@@ -1053,7 +1220,7 @@ INSTRUCTIONS:
             except Exception as e:
                 print(f"SiliconFlow overall pipeline failed: {e}")
 
-        # Try Cerebras AI first if no attachments are present
+        # 3. Try Cerebras AI next
         if not attachments and self.cerebras_keys:
             try:
                 cerebras_messages = []
@@ -1064,7 +1231,7 @@ INSTRUCTIONS:
                         cerebras_messages.append({"role": role, "content": msg["content"]})
                 cerebras_messages.append({"role": "user", "content": user_message})
                 
-                raw_text = await self._get_cerebras_response(cerebras_messages, model="zai-glm-4.7", temperature=1.05)
+                raw_text = await self._get_cerebras_response(cerebras_messages, model="gpt-oss-120b", temperature=1.05)
                 # Check for transcript mirroring glitch and reject to trigger fallback
                 if re.search(r'\[REPLYING TO|\[[^\]]+\]\s*:', raw_text, re.IGNORECASE):
                     raise ValueError("Model echoed transcript formatting")
@@ -1074,9 +1241,24 @@ INSTRUCTIONS:
                     self._update_memory(channel_id, sanitized_text)
                     return sanitized_text
             except Exception as e:
-                print(f"Cerebras default model failed, falling back to Gemini: {e}")
+                print(f"Cerebras default model failed, falling back to Groq/Gemini: {e}")
 
-        models_to_try = ["gemma-4-31b-it", "gemma-4-26b-a4b-it", "gemini-3.1-flash-lite"]
+        # 4. Try Groq AI next
+        if not attachments and self.groq_api_keys:
+            try:
+                groq_prompt = user_message
+                raw_text = await self._get_groq_response(groq_prompt, system_prompt=full_system_instruction, model=self.groq_model, temperature=1.0)
+                if re.search(r'\[REPLYING TO|\[[^\]]+\]\s*:', raw_text, re.IGNORECASE):
+                    raise ValueError("Model echoed transcript formatting")
+                
+                sanitized_text = self._sanitize_output(raw_text)
+                if sanitized_text and "as an ai" not in sanitized_text:
+                    self._update_memory(channel_id, sanitized_text)
+                    return sanitized_text
+            except Exception as e:
+                print(f"Groq primary model failed, falling back to Gemini: {e}")
+
+        models_to_try = ["gemma-4-31b-it", "gemma-4-26b-a4b-it", "gemini-3.6-flash", "gemini-3.1-flash-lite"]
 
         async def query_single_model(model_name):
             num_clients = len(self.clients)
@@ -1089,10 +1271,8 @@ INSTRUCTIONS:
                     if not is_gemma and bot_config.get("google_search_enabled", True):
                         tools = [{"google_search": {}}]
                         
-                    thinking_config = None
-                    # Only apply thinking config if it's a Gemini reasoning model (not flash-lite, not gemma)
-                    if "gemini" in model_name.lower() and "flash-lite" not in model_name.lower() and "thinking" in model_name.lower():
-                        thinking_config = types.ThinkingConfig(thinking_level="LOW")
+                    # Set minimal thinking for Gemini models
+                    thinking_config = types.ThinkingConfig(thinking_level="MINIMAL")
                         
                     response = await self._generate_content_safe(
                         client,
@@ -1160,7 +1340,22 @@ INSTRUCTIONS:
         system_prompt += f"\n[CURRENT PSYCHOLOGICAL STATE]\n[MOOD: BORED] You are bored and nobody has talked in a while. You are sending a message unprompted because you're bored.\n"
         system_prompt += "\n[CONTEXT: UNPROMPTED MESSAGE]\nYou are sending a message into the chat because nobody has talked in a while and you're bored. DO NOT greet anyone specific. DO NOT say 'hello' or 'hey guys'. Just drop a random thought, complaint, question, or observation. Keep it to ONE short sentence max. Be natural.\n"
         
-        if self.silicon_keys:
+        # 1. Try Cloudflare Workers AI first
+        if self.cloudflare_keys and self.cloudflare_account_id:
+            for cf_model in self.cloudflare_models:
+                try:
+                    messages = [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": "[SYSTEM: Generate an unprompted bored message. No greeting. Just a random thought.]"}
+                    ]
+                    raw_text = await self._get_cloudflare_response(messages, model=cf_model, temperature=1.0)
+                    if raw_text:
+                        return self._sanitize_output(raw_text)
+                except Exception as e:
+                    print(f"Cloudflare unprompted generation failed with {cf_model}: {e}")
+
+        # 2. Try SiliconFlow next
+        if self.silicon_keys and time.time() > self.silicon_disabled_until:
             try:
                 messages = [
                     {"role": "system", "content": system_prompt},
@@ -1173,13 +1368,14 @@ INSTRUCTIONS:
             except Exception as e:
                 print(f"SiliconFlow unprompted generation failed: {e}. Falling back to Cerebras/Gemini.")
 
+        # 3. Try Cerebras next
         if self.cerebras_keys:
             try:
                 messages = [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": "[SYSTEM: Generate an unprompted bored message. No greeting. Just a random thought.]"}
                 ]
-                raw_text = await self._get_cerebras_response(messages, model="zai-glm-4.7", temperature=1.0)
+                raw_text = await self._get_cerebras_response(messages, model="gpt-oss-120b", temperature=1.0)
                 if raw_text:
                     return self._sanitize_output(raw_text)
             except Exception as e:
@@ -1190,9 +1386,7 @@ INSTRUCTIONS:
         for attempt in range(len(self.clients)):
             client = self._get_current_client()
             try:
-                thinking_config = None
-                if "flash-lite" not in self.model:
-                    thinking_config = types.ThinkingConfig(thinking_level="LOW")
+                thinking_config = types.ThinkingConfig(thinking_level="MINIMAL")
                 response = await self._generate_content_safe(
                     client,
                     model=self.model,
@@ -1217,7 +1411,22 @@ INSTRUCTIONS:
         system_prompt = self._get_base_prompt()
         system_prompt += "\n[CONTEXT: INSTAGRAM STORY]\nYou are posting a picture to your story. Write a tiny, 1-4 word caption (lowercase). Examples: 'finally', 'so bored', 'food', 'night', 'tired af', 'why am i awake'.\nCRITICAL: You MUST include `[fetch_web: selfie]` or `[fetch_web: aesthetic]` or `[fetch_web: food]` at the end of your caption to attach an image. NO other text.\n"
         
-        if self.silicon_keys:
+        # 1. Try Cloudflare Workers AI first
+        if self.cloudflare_keys and self.cloudflare_account_id:
+            for cf_model in self.cloudflare_models:
+                try:
+                    messages = [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": "[SYSTEM: Generate a story caption with a fetch_web tag.]"}
+                    ]
+                    raw_text = await self._get_cloudflare_response(messages, model=cf_model, temperature=1.0)
+                    if raw_text:
+                        return self._sanitize_output(raw_text)
+                except Exception as e:
+                    print(f"Cloudflare story generation failed with {cf_model}: {e}")
+
+        # 2. Try SiliconFlow next
+        if self.silicon_keys and time.time() > self.silicon_disabled_until:
             try:
                 messages = [
                     {"role": "system", "content": system_prompt},
@@ -1230,13 +1439,14 @@ INSTRUCTIONS:
             except Exception as e:
                 print(f"SiliconFlow story generation failed: {e}. Falling back to Cerebras/Gemini.")
 
+        # 3. Try Cerebras next
         if self.cerebras_keys:
             try:
                 messages = [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": "[SYSTEM: Generate a story caption with a fetch_web tag.]"}
                 ]
-                raw_text = await self._get_cerebras_response(messages, model="zai-glm-4.7", temperature=1.0)
+                raw_text = await self._get_cerebras_response(messages, model="gpt-oss-120b", temperature=1.0)
                 if raw_text:
                     return self._sanitize_output(raw_text)
             except Exception as e:
@@ -1247,9 +1457,7 @@ INSTRUCTIONS:
         for attempt in range(len(self.clients)):
             client = self._get_current_client()
             try:
-                thinking_config = None
-                if "flash-lite" not in self.model:
-                    thinking_config = types.ThinkingConfig(thinking_level="LOW")
+                thinking_config = types.ThinkingConfig(thinking_level="MINIMAL")
                 response = await self._generate_content_safe(
                     client,
                     model=self.model,
@@ -1271,7 +1479,7 @@ INSTRUCTIONS:
         return None
 
     async def get_truth_or_dare(self, mode: str) -> str:
-        """Generates a unique truth or dare prompt using Llama, falling back to Qwen, then Gemini, then local list."""
+        """Generates a unique truth or dare prompt using Groq (GPT-OSS/Qwen), falling back to Gemini, then local list."""
         system_prompt = """You are Reze. Sassy, teasing, slightly chaotic 19-year-old girl from India.
 You are hosting a game of Truth or Dare on Discord.
 Your task is to write a single 'Truth' question or 'Dare' challenge.
@@ -1318,25 +1526,20 @@ Rules:
                 "draw a stick figure of the person who requested this command in MS Paint in under 1 minute and post it."
             ])
 
-        # Try Llama first
+        # Try Groq models first
         if self.groq_api_keys:
-            try:
-                # Use Llama 3.3 70B with higher temperature
-                return await self._get_groq_response(prompt, system_prompt, model="llama-3.3-70b-versatile", temperature=1.0)
-            except Exception as e:
-                print(f"Llama truth/dare generation failed: {e}. Trying Qwen fallback...")
+            for g_model in self.groq_fallback_models:
                 try:
-                    # Fallback to Qwen 2.5 32B with higher temperature
-                    return await self._get_groq_response(prompt, system_prompt, model="qwen-2.5-32b-instruct", temperature=1.0)
-                except Exception as e2:
-                    print(f"Qwen fallback failed: {e2}. Trying Gemini fallback...")
+                    res = await self._get_groq_response(prompt, system_prompt, model=g_model, temperature=1.0)
+                    if res:
+                        return self._sanitize_output(res)
+                except Exception as e:
+                    print(f"Groq model {g_model} truth/dare generation failed: {e}. Trying next...")
 
         # Try Gemini fallback
         try:
             client = self._get_current_client()
-            thinking_config = None
-            if "flash-lite" not in self.model:
-                thinking_config = types.ThinkingConfig(thinking_level="LOW")
+            thinking_config = types.ThinkingConfig(thinking_level="MINIMAL")
             response = await self._generate_content_safe(
                 client,
                 model=self.model,
@@ -1382,7 +1585,7 @@ Note: Do NOT mistake common English greetings (like 'hi', 'he', 'go', 'no') at t
                     contents=prompt,
                     config=types.GenerateContentConfig(
                         thinking_config=types.ThinkingConfig(
-                            thinking_level="LOW"
+                            thinking_level="MINIMAL"
                         ),
                         safety_settings=self.safety_settings
                     )
@@ -1429,7 +1632,7 @@ Rules:
         async def parse_response(text: str) -> tuple[str, str]:
             if not text:
                 return random.choice(default_fallbacks)
-            text = text.strip().strip('*\"\' ')
+            text = self._sanitize_output(text)
             if "|" in text:
                 parts = text.split("|", 1)
                 opt_a = parts[0].strip().strip('*\"\' ')
@@ -1438,25 +1641,19 @@ Rules:
                     return opt_a, opt_b
             return random.choice(default_fallbacks)
 
-        # Try Llama first
+        # Try Groq models first
         if self.groq_api_keys:
-            try:
-                res = await self._get_groq_response(prompt, system_prompt, model="llama-3.3-70b-versatile", temperature=1.0)
-                return await parse_response(res)
-            except Exception as e:
-                print(f"Llama WYR generation failed: {e}. Trying Qwen fallback...")
+            for g_model in self.groq_fallback_models:
                 try:
-                    res = await self._get_groq_response(prompt, system_prompt, model="qwen-2.5-32b-instruct", temperature=1.0)
+                    res = await self._get_groq_response(prompt, system_prompt, model=g_model, temperature=1.0)
                     return await parse_response(res)
-                except Exception as e2:
-                    print(f"Qwen fallback failed: {e2}. Trying Gemini fallback...")
+                except Exception as e:
+                    print(f"Groq model {g_model} WYR generation failed: {e}. Trying next...")
 
         # Try Gemini fallback
         try:
             client = self._get_current_client()
-            thinking_config = None
-            if "flash-lite" not in self.model:
-                thinking_config = types.ThinkingConfig(thinking_level="LOW")
+            thinking_config = types.ThinkingConfig(thinking_level="MINIMAL")
             response = await self._generate_content_safe(
                 client,
                 model=self.model,
@@ -1480,9 +1677,7 @@ Rules:
         for attempt in range(len(self.clients)):
             client = self._get_current_client()
             try:
-                thinking_config = None
-                if "flash-lite" not in self.model:
-                    thinking_config = types.ThinkingConfig(thinking_level="LOW")
+                thinking_config = types.ThinkingConfig(thinking_level="MINIMAL")
                 response = await self._generate_content_safe(
                     client,
                     model=self.model,

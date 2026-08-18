@@ -8,10 +8,10 @@ a feature-packed discord bot built with discord.py, motor (mongodb), and flask. 
 
 ### Multi-Provider AI Engine (`ai_handler.py`)
 the bot doesn't rely on just one AI provider. it includes built-in failovers and key rotators:
-* **Google GenAI**: supports gemini and gemma models (`gemma-4-31b-it`) with multi-key rotation.
-* **Groq API**: fallback to `llama-3.3-70b-versatile` with key rotation.
-* **Cerebras API**: ultra-fast inference fallback using `llama-3.3-70b`.
-* **SiliconFlow / SiliconCloud**: fallback support for models like `DeepSeek-V3` and `Qwen2.5-72B`.
+* **Google GenAI**: supports gemini and gemma models (`gemma-4-31b-it`, `gemini-3.6-flash`, `gemini-3.1-flash-lite`) with multi-key rotation and minimal thinking.
+* **Groq API**: fast fallback to `openai/gpt-oss-120b` and `qwen/qwen3.6-27b` with key rotation.
+* **Cerebras API**: ultra-fast inference fallback using `gpt-oss-120b` and `gemma-4-31b`.
+* **SiliconFlow / SiliconCloud**: fallback support for models like `DeepSeek-V4-Flash` and `GLM-5.2`.
 * **Google Search Integration**: performs live web searches to answer real-time questions.
 * **Smart Memory Compression**: automatically summarizes old channel history into MongoDB documents when conversation length exceeds threshold.
 * **Dynamic Mood System**: shifts between `NORMAL`, `YAPPING`, `LEWD`, and `BORED` modes.

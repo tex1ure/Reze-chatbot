@@ -2089,6 +2089,9 @@ async def get_guild_member_name(guild, user_id: str, bot) -> str:
     return f"Unknown User ({user_id})"
 
 async def generate_family_tree_image(user_id: str, guild, bot) -> bytes:
+    import math
+    from PIL import Image, ImageDraw, ImageFont, ImageFilter
+
     # 1. Fetch relations
     self_fam = await db.get_family(user_id)
     self_name = await get_guild_member_name(guild, user_id, bot)
@@ -2099,7 +2102,6 @@ async def generate_family_tree_image(user_id: str, guild, bot) -> bytes:
     parent_ids = self_fam.get("parents", [])
     parents = []
     grandparents = []
-    
     parent_to_gp_map = {}
     
     for p_id in parent_ids:
@@ -2129,7 +2131,6 @@ async def generate_family_tree_image(user_id: str, guild, bot) -> bytes:
         
     children_ids = self_fam.get("children", [])
     children_tree = []
-    has_grandchildren = False
     
     for c_id in children_ids:
         c_name = await get_guild_member_name(guild, c_id, bot)
@@ -2139,11 +2140,9 @@ async def generate_family_tree_image(user_id: str, guild, bot) -> bytes:
         for gc_id in grandchildren_ids:
             gc_name = await get_guild_member_name(guild, gc_id, bot)
             grandchildren_names.append(gc_name)
-            has_grandchildren = True
         children_tree.append({"name": c_name, "grandchildren": grandchildren_names})
 
     # 2. Layout Elements Setup
-    # Grandparents
     grandparents_elements = []
     for p_name, gp_names in parent_to_gp_map.items():
         if len(gp_names) == 2:
@@ -2167,7 +2166,6 @@ async def generate_family_tree_image(user_id: str, guild, bot) -> bytes:
         if not found:
             grandparents_elements.append({"type": "single", "name": gp, "key": f"gp_{gp}"})
 
-    # Parents
     parents_elements = []
     if len(parents) == 2:
         parents_elements.append({
@@ -2181,7 +2179,6 @@ async def generate_family_tree_image(user_id: str, guild, bot) -> bytes:
         for p in parents:
             parents_elements.append({"type": "single", "name": p, "key": f"p_{p}"})
 
-    # Generation 1 (Self & Siblings)
     half_sib = len(siblings) // 2
     sib_left = siblings[:half_sib]
     sib_right = siblings[half_sib:]
@@ -2204,28 +2201,26 @@ async def generate_family_tree_image(user_id: str, guild, bot) -> bytes:
     for sib in sib_right:
         generation1_elements.append({"type": "single", "name": sib, "key": f"sib_{sib}"})
 
-    # Children
     children_elements = []
     for child in children_tree:
         children_elements.append({"type": "single", "name": child["name"], "key": f"c_{child['name']}"})
 
-    # Grandchildren
     grandchildren_elements = []
     for child in children_tree:
         for gc in child["grandchildren"]:
             grandchildren_elements.append({"type": "single", "name": gc, "key": f"gc_{gc}"})
 
-    # 3. Size and Geometry Calculations
-    G = 65 # gap between elements
-    card_w, card_h = 190, 56
-    
+    # 3. Geometry Calculations
+    G = 75
+    card_w, card_h = 210, 68
+
     def get_element_width(el):
-        return 460 if el["type"] == "couple" else 190
-        
+        return (card_w * 2 + 100) if el["type"] == "couple" else card_w
+
     def get_layer_width(elements):
         if not elements: return 0
         return sum(get_element_width(el) for el in elements) + (len(elements) - 1) * G
-        
+
     widths = [
         get_layer_width(grandparents_elements),
         get_layer_width(parents_elements),
@@ -2233,67 +2228,111 @@ async def generate_family_tree_image(user_id: str, guild, bot) -> bytes:
         get_layer_width(children_elements),
         get_layer_width(grandchildren_elements)
     ]
-    width = max(1200, max(widths) + 120)
-    
+    left_gutter = 240
+    width = max(1450, max(widths) + left_gutter + 140)
+
     y_coords = {}
-    current_y = 120
+    current_y = 170
     
+    layer_configs = []
     if grandparents_elements:
         y_coords["grandparents"] = current_y
-        current_y += 140
+        layer_configs.append(("GEN I • ANCESTORS", current_y))
+        current_y += 150
         
     if parents_elements:
         y_coords["parents"] = current_y
-        current_y += 140
+        layer_configs.append(("GEN II • PARENTS", current_y))
+        current_y += 150
         
     y_coords["self"] = current_y
-    current_y += 140
+    layer_configs.append(("GEN III • CORE FAMILY", current_y))
+    current_y += 150
     
     if children_elements:
         y_coords["children"] = current_y
-        current_y += 140
+        layer_configs.append(("GEN IV • CHILDREN", current_y))
+        current_y += 150
         
     if grandchildren_elements:
         y_coords["grandchildren"] = current_y
-        current_y += 140
+        layer_configs.append(("GEN V • DESCENDANTS", current_y))
+        current_y += 150
         
-    height = current_y + 40
+    height = current_y + 60
+
+    # 4. Base Canvas & Background Ambience
+    img = Image.new("RGBA", (width, height), (9, 10, 15, 255))
     
-    from PIL import Image, ImageDraw, ImageFont
-    
-    img = Image.new("RGBA", (width, height), (24, 18, 36, 255))
-    draw = ImageDraw.Draw(img)
-    
+    # Subtle dot-matrix grid
+    grid_img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    grid_draw = ImageDraw.Draw(grid_img)
+    dot_spacing = 30
+    for gx in range(20, width, dot_spacing):
+        for gy in range(20, height, dot_spacing):
+            grid_draw.rectangle([gx, gy, gx+1, gy+1], fill=(255, 255, 255, 12))
+    img = Image.alpha_composite(img, grid_img)
+
+    # Ambient radial lighting
     glow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     glow_draw = ImageDraw.Draw(glow)
-    glow_draw.ellipse([-200, -200, 400, 400], fill=(120, 80, 200, 40))
-    glow_draw.ellipse([width-400, height-400, width+200, height+200], fill=(200, 80, 150, 45))
+    glow_draw.ellipse([-150, -150, 600, 600], fill=(147, 51, 234, 45))
+    glow_draw.ellipse([width - 650, height - 600, width + 150, height + 150], fill=(225, 29, 72, 35))
+    glow_draw.ellipse([width//2 - 350, y_coords["self"] - 200, width//2 + 350, y_coords["self"] + 200], fill=(59, 130, 246, 25))
+    glow = glow.filter(ImageFilter.GaussianBlur(radius=30))
     img = Image.alpha_composite(img, glow)
     draw = ImageDraw.Draw(img)
-    
+
+    # Outer border with corner brackets
+    draw.rounded_rectangle([15, 15, width - 15, height - 15], radius=16, outline=(255, 255, 255, 25), width=1)
+    corner_len = 25
+    c_color = (168, 85, 247, 180)
+    for px, py, dx, dy in [(25, 25, 1, 1), (width - 25, 25, -1, 1), (25, height - 25, 1, -1), (width - 25, height - 25, -1, -1)]:
+        draw.line([px, py, px + dx * corner_len, py], fill=c_color, width=2)
+        draw.line([px, py, px, py + dy * corner_len], fill=c_color, width=2)
+
+    # 5. Fonts Setup
     try:
-        title_font_path = os.path.join(BASE_DIR, "assets", "fonts", "Roboto-Bold.ttf")
-        name_font_path = os.path.join(BASE_DIR, "assets", "fonts", "Roboto-Regular.ttf")
-        title_font = ImageFont.truetype(title_font_path, 36)
-        name_font = ImageFont.truetype(name_font_path, 15)
+        font_bold = os.path.join(BASE_DIR, "assets", "fonts", "Roboto-Bold.ttf")
+        font_display = os.path.join(BASE_DIR, "assets", "fonts", "Anton-Regular.ttf")
+        title_font = ImageFont.truetype(font_display, 44)
+        sub_font = ImageFont.truetype(font_bold, 11)
+        badge_font = ImageFont.truetype(font_bold, 10)
+        name_font = ImageFont.truetype(font_bold, 16)
+        layer_font = ImageFont.truetype(font_bold, 11)
     except IOError:
         title_font = ImageFont.load_default()
+        sub_font = ImageFont.load_default()
+        badge_font = ImageFont.load_default()
         name_font = ImageFont.load_default()
-        
-    title_text = f"{self_name}'s Family Tree"
-    try:
-        t_w = title_font.getbbox(title_text)[2] - title_font.getbbox(title_text)[0]
-    except Exception:
-        t_w = draw.textlength(title_text, font=title_font)
-    draw.text(((width - t_w)//2, 35), title_text, fill=(255, 215, 0, 255), font=title_font)
+        layer_font = ImageFont.load_default()
 
-    # 4. Lay out the coordinates
+    # Header Top Chip
+    chip_text = "E-FAMILY DYNASTY REGISTRY"
+    chip_w = draw.textlength(chip_text, font=sub_font)
+    chip_x = (width - chip_w) // 2
+    draw.rounded_rectangle([chip_x - 16, 32, chip_x + chip_w + 16, 52], radius=10, fill=(168, 85, 247, 30), outline=(168, 85, 247, 90), width=1)
+    draw.text((chip_x, 36), chip_text, fill=(216, 180, 254, 255), font=sub_font)
+
+    # Header Title
+    title_text = f"{self_name.upper()}'S LINEAGE"
+    t_w = draw.textlength(title_text, font=title_font)
+    draw.text(((width - t_w)//2 + 2, 60 + 2), title_text, fill=(0, 0, 0, 180), font=title_font)
+    draw.text(((width - t_w)//2, 60), title_text, fill=(255, 255, 255, 255), font=title_font)
+
+    # Generation Guide Rails
+    guide_x = left_gutter - 25
+    draw.line([guide_x, 130, guide_x, height - 70], fill=(255, 255, 255, 20), width=1)
+    for label, ly in layer_configs:
+        draw.line([guide_x - 15, ly, guide_x, ly], fill=(168, 85, 247, 160), width=2)
+        draw.text((35, ly - 7), label, fill=(148, 163, 184, 220), font=layer_font)
+
+    # 6. Layout Node Coordinates
     node_coords = {}
-    
     def layout_layer(elements, y):
         if not elements: return
         layer_w = get_layer_width(elements)
-        start_x = (width - layer_w) / 2
+        start_x = left_gutter + (width - left_gutter - 40 - layer_w) / 2
         current_x = start_x
         for el in elements:
             el_w = get_element_width(el)
@@ -2301,95 +2340,92 @@ async def generate_family_tree_image(user_id: str, guild, bot) -> bytes:
                 cx = int(current_x + el_w / 2)
                 node_coords[el["key"]] = (cx, y)
             elif el["type"] == "couple":
-                cx1 = int(current_x + 190 / 2)
-                cx2 = int(current_x + 190 + 80 + 190 / 2)
+                cx1 = int(current_x + card_w / 2)
+                cx2 = int(current_x + card_w + 100 + card_w / 2)
                 node_coords[el["key1"]] = (cx1, y)
                 node_coords[el["key2"]] = (cx2, y)
             current_x += el_w + G
-            
-    if grandparents_elements:
-        layout_layer(grandparents_elements, y_coords["grandparents"])
-    if parents_elements:
-        layout_layer(parents_elements, y_coords["parents"])
-        
-    layout_layer(generation1_elements, y_coords["self"])
-    
-    if children_elements:
-        layout_layer(children_elements, y_coords["children"])
-    if grandchildren_elements:
-        layout_layer(grandchildren_elements, y_coords["grandchildren"])
 
-    # 5. Connection Lines (Bus layout to prevent crossing through cards)
-    def draw_bus_connection(src_point, target_keys, target_y, bus_y_offset=0):
+    if grandparents_elements: layout_layer(grandparents_elements, y_coords["grandparents"])
+    if parents_elements: layout_layer(parents_elements, y_coords["parents"])
+    layout_layer(generation1_elements, y_coords["self"])
+    if children_elements: layout_layer(children_elements, y_coords["children"])
+    if grandchildren_elements: layout_layer(grandchildren_elements, y_coords["grandchildren"])
+
+    # 7. Helper: Vector Heart
+    def draw_vector_heart(d, cx, cy, size=24, fill_color=(244, 63, 94, 255), outline_color=(255, 255, 255, 240)):
+        points = []
+        scale = size / 32.0
+        for i in range(120):
+            t = i * (2 * math.pi / 120)
+            x = 16 * (math.sin(t) ** 3)
+            y = -(13 * math.cos(t) - 5 * math.cos(2*t) - 2 * math.cos(3*t) - math.cos(4*t))
+            points.append((cx + x * scale, cy + y * scale + size * 0.1))
+        d.polygon(points, fill=fill_color)
+        d.line(points + [points[0]], fill=outline_color, width=2)
+
+    # 8. Glowing Connection Lines
+    lines_glow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    lg_draw = ImageDraw.Draw(lines_glow)
+
+    def draw_bus_connection(src_point, target_keys, target_y, bus_y_offset=0, line_color=(99, 102, 241), glow_color=(129, 140, 248, 60)):
         target_xs = [node_coords[k][0] for k in target_keys if k in node_coords]
         if not target_xs: return
-        
-        min_x = min(target_xs)
-        max_x = max(target_xs)
-        
-        span_min_x = min(src_point[0], min_x)
-        span_max_x = max(src_point[0], max_x)
-        
+        min_x, max_x = min(target_xs), max(target_xs)
+        span_min_x, span_max_x = min(src_point[0], min_x), max(src_point[0], max_x)
         bus_y = (src_point[1] + target_y) // 2 + bus_y_offset
-        
-        # Vertical down from source to bus line
-        draw.line([src_point[0], src_point[1], src_point[0], bus_y], fill=(100, 100, 180, 150), width=3)
-        # Horizontal bus line
-        draw.line([span_min_x, bus_y, span_max_x, bus_y], fill=(100, 100, 180, 150), width=3)
-        # Vertical down from bus line to each target
+
+        for w_offset, alpha in [(6, glow_color[3]), (4, int(glow_color[3] * 1.5))]:
+            g_rgba = (*line_color, alpha)
+            lg_draw.line([src_point[0], src_point[1] + card_h//2, src_point[0], bus_y], fill=g_rgba, width=w_offset)
+            lg_draw.line([span_min_x, bus_y, span_max_x, bus_y], fill=g_rgba, width=w_offset)
+            for tx in target_xs:
+                lg_draw.line([tx, bus_y, tx, target_y - card_h//2], fill=g_rgba, width=w_offset)
+
+        c_rgba = (*line_color, 220)
+        draw.line([src_point[0], src_point[1] + card_h//2, src_point[0], bus_y], fill=c_rgba, width=2)
+        draw.line([span_min_x, bus_y, span_max_x, bus_y], fill=c_rgba, width=2)
         for tx in target_xs:
-            draw.line([tx, bus_y, tx, target_y], fill=(100, 100, 180, 150), width=3)
+            draw.line([tx, bus_y, tx, target_y - card_h//2], fill=c_rgba, width=2)
+            draw.ellipse([tx - 3, target_y - card_h//2 - 4, tx + 3, target_y - card_h//2 + 2], fill=(255, 255, 255, 240))
+        draw.ellipse([src_point[0] - 3, src_point[1] + card_h//2 - 2, src_point[0] + 3, src_point[1] + card_h//2 + 4], fill=(255, 255, 255, 240))
 
-    # Draw couple connection lines
+    def draw_couple_link(key1, key2, y, is_main_couple=False):
+        if key1 not in node_coords or key2 not in node_coords: return
+        x1 = node_coords[key1][0]
+        x2 = node_coords[key2][0]
+        c_y = y
+        line_col = (244, 63, 94) if is_main_couple else (148, 163, 184)
+        lg_draw.line([x1 + card_w // 2, c_y, x2 - card_w // 2, c_y], fill=(*line_col, 80), width=6)
+        draw.line([x1 + card_w // 2, c_y, x2 - card_w // 2, c_y], fill=(*line_col, 220), width=2)
+        mid_x = (x1 + x2) // 2
+        draw_vector_heart(draw, mid_x, c_y - 2, size=24, fill_color=(*line_col, 255), outline_color=(255, 255, 255, 240))
+
     for el in grandparents_elements:
-        if el["type"] == "couple":
-            x1 = node_coords[el["key1"]][0]
-            x2 = node_coords[el["key2"]][0]
-            y = y_coords["grandparents"]
-            draw.line([x1 + card_w // 2, y, x2 - card_w // 2, y], fill=(100, 100, 180, 150), width=3)
-            
+        if el["type"] == "couple": draw_couple_link(el["key1"], el["key2"], y_coords["grandparents"])
     for el in parents_elements:
-        if el["type"] == "couple":
-            x1 = node_coords[el["key1"]][0]
-            x2 = node_coords[el["key2"]][0]
-            y = y_coords["parents"]
-            draw.line([x1 + card_w // 2, y, x2 - card_w // 2, y], fill=(100, 100, 180, 150), width=3)
-            
-    if spouse_name:
-        x1 = node_coords["self"][0]
-        x2 = node_coords["spouse"][0]
-        y = y_coords["self"]
-        draw.line([x1 + card_w // 2, y, x2 - card_w // 2, y], fill=(255, 105, 180, 150), width=3)
+        if el["type"] == "couple": draw_couple_link(el["key1"], el["key2"], y_coords["parents"])
+    if spouse_name: draw_couple_link("self", "spouse", y_coords["self"], is_main_couple=True)
 
-    # Grandparents to Parents
     for p_name, gp_names in parent_to_gp_map.items():
         parent_key = f"p_{p_name}"
         if parent_key in node_coords:
             couple_el = None
             for el in grandparents_elements:
                 if el["type"] == "couple" and el["name1"] in gp_names and el["name2"] in gp_names:
-                    couple_el = el
-                    break
+                    couple_el = el; break
             if couple_el:
                 x1 = node_coords[couple_el["key1"]][0]
                 x2 = node_coords[couple_el["key2"]][0]
-                gp_center = ((x1 + x2) // 2, y_coords["grandparents"])
-                mid_y = (gp_center[1] + y_coords["parents"]) // 2
-                draw.line([gp_center[0], gp_center[1], gp_center[0], mid_y], fill=(100, 100, 180, 150), width=3)
-                draw.line([gp_center[0], mid_y, node_coords[parent_key][0], mid_y], fill=(100, 100, 180, 150), width=3)
-                draw.line([node_coords[parent_key][0], mid_y, node_coords[parent_key][0], y_coords["parents"]], fill=(100, 100, 180, 150), width=3)
+                src_point = ((x1 + x2) // 2, y_coords["grandparents"])
+                draw_bus_connection(src_point, [parent_key], y_coords["parents"], line_color=(139, 92, 246))
             else:
                 for gp in gp_names:
                     gp_key = f"gp_{gp}"
                     if gp_key in node_coords:
-                        x1, y1 = node_coords[gp_key]
-                        x2, y2 = node_coords[parent_key]
-                        mid_y = (y1 + y2) // 2
-                        draw.line([x1, y1, x1, mid_y], fill=(100, 100, 180, 150), width=3)
-                        draw.line([x1, mid_y, x2, mid_y], fill=(100, 100, 180, 150), width=3)
-                        draw.line([x2, mid_y, x2, y2], fill=(100, 100, 180, 150), width=3)
+                        src_point = node_coords[gp_key]
+                        draw_bus_connection(src_point, [parent_key], y_coords["parents"], line_color=(139, 92, 246))
 
-    # Parents to Self & Siblings
     if parents_elements:
         if parents_elements[0]["type"] == "couple":
             el = parents_elements[0]
@@ -2399,23 +2435,18 @@ async def generate_family_tree_image(user_id: str, guild, bot) -> bytes:
         else:
             p_name = parents[0]
             src_point = node_coords[f"p_{p_name}"]
-            
         target_keys = ["self"] + [f"sib_{sib}" for sib in siblings]
         draw_bus_connection(src_point, target_keys, y_coords["self"])
 
-    # Self & Spouse to Children
     if children_elements:
         if spouse_name:
             x1 = node_coords["self"][0]
             x2 = node_coords["spouse"][0]
             src_point = ((x1 + x2) // 2, y_coords["self"])
-        else:
-            src_point = node_coords["self"]
-            
+        else: src_point = node_coords["self"]
         target_keys = [f"c_{child['name']}" for child in children_tree]
-        draw_bus_connection(src_point, target_keys, y_coords["children"])
+        draw_bus_connection(src_point, target_keys, y_coords["children"], line_color=(236, 72, 153))
 
-    # Children to Grandchildren
     if grandchildren_elements:
         parent_children = [c for c in children_tree if c["grandchildren"]]
         for idx, child in enumerate(parent_children):
@@ -2424,40 +2455,99 @@ async def generate_family_tree_image(user_id: str, guild, bot) -> bytes:
             if c_key in node_coords:
                 target_gcs = [f"gc_{gc}" for gc in child["grandchildren"]]
                 offset = (idx - (len(parent_children) - 1) / 2) * 16
-                draw_bus_connection(node_coords[c_key], target_gcs, y_coords["grandchildren"], bus_y_offset=int(offset))
+                draw_bus_connection(node_coords[c_key], target_gcs, y_coords["grandchildren"], bus_y_offset=int(offset), line_color=(139, 92, 246))
 
-    # 6. Draw Cards
-    def draw_card(cx, cy, name, is_self=False, is_spouse=False):
+    img = Image.alpha_composite(img, lines_glow)
+    draw = ImageDraw.Draw(img)
+
+    # 9. Role Badges and Card Rendering
+    ROLE_STYLES = {
+        "self": {"label": "YOU", "accent": (245, 158, 11), "border": (251, 191, 36, 255), "glow": (245, 158, 11, 45), "bg": (28, 22, 16, 235), "badge_bg": (245, 158, 11, 55), "badge_fg": (253, 230, 138, 255)},
+        "spouse": {"label": "SPOUSE", "accent": (244, 63, 94), "border": (251, 113, 133, 255), "glow": (244, 63, 94, 45), "bg": (28, 16, 22, 235), "badge_bg": (244, 63, 94, 55), "badge_fg": (254, 205, 211, 255)},
+        "parent": {"label": "PARENT", "accent": (59, 130, 246), "border": (96, 165, 250, 200), "glow": (59, 130, 246, 25), "bg": (15, 23, 42, 230), "badge_bg": (59, 130, 246, 40), "badge_fg": (191, 219, 254, 255)},
+        "grandparent": {"label": "ANCESTOR", "accent": (139, 92, 246), "border": (167, 139, 250, 200), "glow": (139, 92, 246, 25), "bg": (23, 18, 41, 230), "badge_bg": (139, 92, 246, 40), "badge_fg": (221, 214, 254, 255)},
+        "sibling": {"label": "SIBLING", "accent": (20, 184, 166), "border": (45, 212, 191, 190), "glow": (20, 184, 166, 25), "bg": (13, 29, 31, 230), "badge_bg": (20, 184, 166, 40), "badge_fg": (153, 246, 228, 255)},
+        "child": {"label": "CHILD", "accent": (236, 72, 153), "border": (244, 114, 182, 190), "glow": (236, 72, 153, 25), "bg": (29, 16, 27, 230), "badge_bg": (236, 72, 153, 40), "badge_fg": (251, 207, 232, 255)},
+        "grandchild": {"label": "DESCENDANT", "accent": (168, 85, 247), "border": (192, 132, 252, 190), "glow": (168, 85, 247, 25), "bg": (24, 17, 36, 230), "badge_bg": (168, 85, 247, 40), "badge_fg": (233, 213, 255, 255)}
+    }
+
+    cards_glow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    cg_draw = ImageDraw.Draw(cards_glow)
+    for key, (cx, cy) in node_coords.items():
+        role_type = "sibling"
+        if key == "self": role_type = "self"
+        elif key == "spouse": role_type = "spouse"
+        elif key.startswith("gp_"): role_type = "grandparent"
+        elif key.startswith("p_"): role_type = "parent"
+        elif key.startswith("sib_"): role_type = "sibling"
+        elif key.startswith("c_"): role_type = "child"
+        elif key.startswith("gc_"): role_type = "grandchild"
+
+        style = ROLE_STYLES.get(role_type, ROLE_STYLES["sibling"])
         left = cx - card_w // 2
         top = cy - card_h // 2
         right = left + card_w
         bottom = top + card_h
+        cg_draw.rounded_rectangle([left - 4, top - 4, right + 4, bottom + 4], radius=16, fill=style["glow"])
+
+    cards_glow = cards_glow.filter(ImageFilter.GaussianBlur(radius=6))
+    img = Image.alpha_composite(img, cards_glow)
+    draw = ImageDraw.Draw(img)
+
+    def draw_refined_card(cx, cy, name, role_type="sibling"):
+        style = ROLE_STYLES.get(role_type, ROLE_STYLES["sibling"])
+        left = cx - card_w // 2
+        top = cy - card_h // 2
+        right = left + card_w
+        bottom = top + card_h
+
+        # 1. Card Glass Background
+        draw.rounded_rectangle([left, top, right, bottom], radius=12, fill=style["bg"], outline=style["border"], width=1)
         
-        bg_color = (138, 43, 226, 70) if is_self else ((219, 112, 147, 70) if is_spouse else (40, 40, 70, 200))
-        border_color = (255, 215, 0, 240) if is_self else ((255, 105, 180, 220) if is_spouse else (100, 100, 180, 255))
-        
-        draw.rounded_rectangle([left, top, right, bottom], radius=10, fill=bg_color, outline=border_color, width=2)
-        draw.text((cx, cy), name, fill=(255, 255, 255, 255), font=name_font, anchor="mm")
+        # 2. Top-edge glossy highlight line
+        draw.line([left + 14, top + 1, right - 14, top + 1], fill=(255, 255, 255, 70), width=1)
+
+        # 3. Role Badge (Pill)
+        b_label = style["label"]
+        b_w = draw.textlength(b_label, font=badge_font)
+        b_left = cx - b_w / 2 - 8
+        b_top = top + 9
+        b_right = cx + b_w / 2 + 8
+        b_bottom = b_top + 16
+        draw.rounded_rectangle([b_left, b_top, b_right, b_bottom], radius=8, fill=style["badge_bg"], outline=(*style["accent"], 180), width=1)
+        draw.text((cx, b_top + 2), b_label, fill=style["badge_fg"], font=badge_font, anchor="mt")
+
+        # 4. Name Text (Dynamic sizing & truncate if abnormally long)
+        display_name = name
+        current_name_font = name_font
+        txt_w = draw.textlength(display_name, font=current_name_font)
+        if txt_w > card_w - 24:
+            current_name_font = ImageFont.truetype(font_bold, 13) if "font_bold" in locals() else name_font
+            txt_w = draw.textlength(display_name, font=current_name_font)
+            if txt_w > card_w - 24:
+                while len(display_name) > 3 and draw.textlength(display_name + "...", font=current_name_font) > card_w - 24:
+                    display_name = display_name[:-1]
+                display_name += "..."
+
+        name_y = top + 34
+        draw.text((cx + 1, name_y + 1), display_name, fill=(0, 0, 0, 200), font=current_name_font, anchor="mt")
+        draw.text((cx, name_y), display_name, fill=(248, 250, 252, 255), font=current_name_font, anchor="mt")
 
     for key, (cx, cy) in node_coords.items():
         if key == "self":
-            draw_card(cx, cy, self_name, is_self=True)
+            draw_refined_card(cx, cy, self_name, "self")
         elif key == "spouse":
-            draw_card(cx, cy, spouse_name, is_spouse=True)
-        else:
-            clean_name = ""
-            if key.startswith("gp_"): clean_name = key[3:]
-            elif key.startswith("p_"): clean_name = key[2:]
-            elif key.startswith("sib_"): clean_name = key[4:]
-            elif key.startswith("c_"): clean_name = key[2:]
-            elif key.startswith("gc_"): clean_name = key[3:]
-            draw_card(cx, cy, clean_name)
-            
-    if spouse_name and "self" in node_coords and "spouse" in node_coords:
-        x1 = node_coords["self"][0]
-        x2 = node_coords["spouse"][0]
-        y = y_coords["self"]
-        draw.text(((x1 + x2) // 2, y), "💖", fill=(255, 20, 147, 255), font=name_font, anchor="mm")
+            draw_refined_card(cx, cy, spouse_name, "spouse")
+        elif key.startswith("gp_"):
+            draw_refined_card(cx, cy, key[3:], "grandparent")
+        elif key.startswith("p_"):
+            draw_refined_card(cx, cy, key[2:], "parent")
+        elif key.startswith("sib_"):
+            draw_refined_card(cx, cy, key[4:], "sibling")
+        elif key.startswith("c_"):
+            draw_refined_card(cx, cy, key[2:], "child")
+        elif key.startswith("gc_"):
+            draw_refined_card(cx, cy, key[3:], "grandchild")
 
     import io
     output_buffer = io.BytesIO()

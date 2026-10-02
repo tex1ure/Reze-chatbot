@@ -19,7 +19,6 @@ if sys.platform == "win32":
 
 import time
 import random
-import glob
 import re
 import aiohttp
 import io

@@ -50,7 +50,7 @@ class AIHandler:
             self.cerebras_keys = []
         self.current_cerebras_key_index = 0
         self.cerebras_model = "gpt-oss-120b"
-        self.cerebras_models = ["gpt-oss-120b", "gemma-4-31b"]
+        self.cerebras_models = ["gpt-oss-120b"]
 
         # Initialize SiliconFlow settings
         raw_silicon_keys = os.getenv("SILICON_API")
@@ -82,9 +82,7 @@ class AIHandler:
             "@cf/qwen/qwen3.8-27b",
             "@cf/qwen/qwen2.5-coder-32b-instruct",
             "@cf/meta/llama-3.1-70b-instruct",
-            "alibaba/qwen3.5-397b-a17b",
             "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b",
-            "google/gemini-3.7-flash",
             "@cf/meta/llama-3.2-3b-instruct"
         ]
 

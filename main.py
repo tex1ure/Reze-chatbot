@@ -5289,6 +5289,8 @@ async def on_message(message):
 
     # --- REPLY CONTEXT: Fetch referenced message content + images ---
     reply_context = ""
+    ref_image_note = ""
+    bot_referenced_attachments = []
     if message.reference:
         ref_msg = message.reference.resolved
         if ref_msg is None:
@@ -5297,15 +5299,30 @@ async def on_message(message):
             except:
                 ref_msg = None
         if isinstance(ref_msg, discord.Message):
-            reply_context = f"[REPLYING TO {ref_msg.author.display_name}]: {ref_msg.content}"
-            # Also grab images from the replied-to message
-            for att in ref_msg.attachments:
-                if att.content_type in ALLOWED_MIME_TYPES and att.size <= MAX_SIZE_BYTES and len(attachments_data) < MAX_FILES:
-                    try:
-                        file_bytes = await att.read()
-                        attachments_data.append({"data": file_bytes, "mime_type": att.content_type})
-                    except:
-                        pass
+            is_ref_bot = (ref_msg.author == bot.user)
+            if is_ref_bot:
+                ref_suffix = " (referencing the image you posted)" if ref_msg.attachments else ""
+                reply_context = f"[REPLYING TO YOUR PREVIOUS MESSAGE]: {ref_msg.content}{ref_suffix}"
+                # Grab images from Reze's message and pass as bot_referenced_attachments
+                # so Reze can see the image as HER OWN without mistaking it for a user upload
+                for att in ref_msg.attachments:
+                    if att.content_type in ALLOWED_MIME_TYPES and att.size <= MAX_SIZE_BYTES:
+                        try:
+                            file_bytes = await att.read()
+                            bot_referenced_attachments.append({"data": file_bytes, "mime_type": att.content_type})
+                        except:
+                            pass
+            else:
+                reply_context = f"[REPLYING TO {ref_msg.author.display_name}]: {ref_msg.content}"
+                # Grab images from replied-to message only when sent by someone else
+                for att in ref_msg.attachments:
+                    if att.content_type in ALLOWED_MIME_TYPES and att.size <= MAX_SIZE_BYTES and len(attachments_data) < MAX_FILES:
+                        try:
+                            file_bytes = await att.read()
+                            attachments_data.append({"data": file_bytes, "mime_type": att.content_type})
+                            ref_image_note = f"\n(Note: The image attached was sent by {ref_msg.author.display_name} in the message being replied to, not by {message.author.display_name}.)"
+                        except:
+                            pass
 
     # Don't return if they sent an image/video without text
     if not clean_content and not attachments_data and is_mentioned:
@@ -5326,6 +5343,8 @@ async def on_message(message):
     formatted_user_message = f"[{message.author.display_name}]: {message.clean_content}"
     if reply_context:
         formatted_user_message = f"{reply_context}\n{formatted_user_message}"
+    if ref_image_note:
+        formatted_user_message += ref_image_note
 
     # (Late reply simulation removed to eliminate response delay)
     
@@ -5646,7 +5665,8 @@ async def on_message(message):
                 channel_id=channel_id,
                 long_term_summary=long_term_summary,
                 is_nsfw=is_nsfw,
-                user_name=nickname
+                user_name=nickname,
+                bot_referenced_attachments=bot_referenced_attachments
             )
 
             # Update channel memory in MongoDB (annotate with image metadata)

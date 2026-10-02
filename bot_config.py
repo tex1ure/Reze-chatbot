@@ -39,13 +39,13 @@ config = {
     "eavesdrop_chance": 0.005,
     "status_roast_chance": 0.15,
 
-    # --- Background Tasks ---
-    "unprompted_enabled": True,
+    # --- Background Tasks (Ghost messages disabled) ---
+    "unprompted_enabled": False,
     "unprompted_min_interval": 1800,
     "unprompted_max_interval": 3600,
     "unprompted_dead_threshold": 2700,
     "unprompted_chance": 0.25,
-    "wrong_chat_enabled": True,
+    "wrong_chat_enabled": False,
     "wrong_chat_min_interval": 7200,
     "wrong_chat_max_interval": 18000,
     "wrong_chat_chance": 0.15,

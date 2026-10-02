@@ -1015,7 +1015,7 @@ INSTRUCTIONS:
         self.current_key_index = (self.current_key_index + 1) % len(self.clients)
         print(f"Rotating to API Key #{self.current_key_index + 1}")
 
-    async def get_ai_response(self, user_message: str, history: list = None, attachments: list = None, is_hinglish: bool = False, user_context: str = None, channel_id: str = "default", long_term_summary: str = "", is_nsfw: bool = False, user_name: str = None) -> str:
+    async def get_ai_response(self, user_message: str, history: list = None, attachments: list = None, is_hinglish: bool = False, user_context: str = None, channel_id: str = "default", long_term_summary: str = "", is_nsfw: bool = False, user_name: str = None, bot_referenced_attachments: list = None) -> str:
         self._update_channel_activity(channel_id)
         full_system_instruction = self._build_dynamic_prompt(user_context, is_hinglish, channel_id, long_term_summary, is_nsfw=is_nsfw, user_name=user_name)
 
@@ -1027,6 +1027,7 @@ INSTRUCTIONS:
             "?" in user_message or
             any(w in msg_lower for w in ["why", "how", "what do you think", "explain", "tell me about", "opinion"]) or
             attachments or
+            bot_referenced_attachments or
             len(history or []) < 4
         )
         thinking_level = "high" if needs_deep_thought else "low"
@@ -1041,6 +1042,18 @@ INSTRUCTIONS:
                         parts=[types.Part.from_text(text=msg["content"])]
                     )
                 )  
+
+        # If the user is replying to an image Reze posted, attach the image to Reze's (model) turn!
+        # This gives Reze full visual understanding of her image without mistaking it for a user upload.
+        if bot_referenced_attachments:
+            bot_parts = [types.Part.from_bytes(data=att["data"], mime_type=att["mime_type"]) for att in bot_referenced_attachments]
+            if contents and contents[-1].role == "model":
+                contents[-1].parts = bot_parts + contents[-1].parts
+            elif contents and contents[-1].role == "user":
+                contents.append(types.Content(role="model", parts=bot_parts + [types.Part.from_text(text="[Image previously sent by Reze]")]))
+            else:
+                contents.append(types.Content(role="user", parts=[types.Part.from_text(text="[Chat]")]))
+                contents.append(types.Content(role="model", parts=bot_parts + [types.Part.from_text(text="[Image previously sent by Reze]")]))
                   
         current_parts = []  
         if attachments:  

@@ -68,7 +68,7 @@ config = {
 
     # --- AI Configuration ---
     "temperature": 0.9,
-    "model": "gemma-4-31b-it",
+    "model": "gemini-3.5-flash-lite",
     "mood_duration_hours": 6,
     "memory_compress_threshold": 20,
     "memory_keep_count": 10,

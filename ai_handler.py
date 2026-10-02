@@ -29,8 +29,8 @@ class AIHandler:
 
         # Initialize clients for each key  
         self.clients = [genai.Client(api_key=key) for key in self.api_keys]  
-        self.current_key_index = 0  
-        self.model = "gemini-3.5-flash-lite"
+        self.current_key_index = 0
+        self.model = bot_config.get("model", "gemini-3.5-flash-lite")
 
         # Initialize Groq client settings
         raw_groq_keys = os.getenv("GROQ_API_KEY")
@@ -40,7 +40,7 @@ class AIHandler:
             self.groq_api_keys = []
         self.current_groq_key_index = 0
         self.groq_model = "openai/gpt-oss-120b"
-        self.groq_fallback_models = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.6-27b"]
+        self.groq_fallback_models = ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"]
 
         # Initialize Cerebras settings
         raw_cerebras_keys = os.getenv("CEREBRAS_API_KEY")
@@ -1060,7 +1060,117 @@ INSTRUCTIONS:
         current_parts.append(types.Part.from_text(text=user_message))  
         contents.append(types.Content(role="user", parts=current_parts))  
 
-        # 1. Try Cloudflare Workers AI first as PRIMARY provider (if no attachments)
+        # 1. Try Google Gemini first as PRIMARY / MAIN MODEL
+        main_model = bot_config.get("model", self.model)
+        models_to_try = [main_model, "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.6-flash", "gemini-3.8-flash"]
+        models_to_try = list(dict.fromkeys([m for m in models_to_try if m]))
+
+        if self.clients:
+            async def query_single_gemini_model(model_name):
+                num_clients = len(self.clients)
+                for attempt in range(num_clients):
+                    idx = (self.current_key_index + attempt) % num_clients
+                    client = self.clients[idx]
+                    try:
+                        is_gemma = "gemma" in model_name.lower()
+                        tools = None
+                        if not is_gemma and bot_config.get("google_search_enabled", True):
+                            tools = [{"google_search": {}}]
+                            
+                        thinking_config = types.ThinkingConfig(thinking_level="MINIMAL")
+                            
+                        try:
+                            response = await self._generate_content_safe(
+                                client,
+                                model=model_name,
+                                contents=contents,
+                                config=types.GenerateContentConfig(
+                                    temperature=1.05,
+                                    system_instruction=full_system_instruction,
+                                    tools=tools,
+                                    thinking_config=thinking_config,
+                                    safety_settings=self.safety_settings
+                                )
+                            )
+                        except Exception as search_err:
+                            if tools and any(x in str(search_err).lower() for x in ["quota", "429"]):
+                                # Fallback without search tool if search quota is exhausted
+                                response = await self._generate_content_safe(
+                                    client,
+                                    model=model_name,
+                                    contents=contents,
+                                    config=types.GenerateContentConfig(
+                                        temperature=1.05,
+                                        system_instruction=full_system_instruction,
+                                        tools=None,
+                                        thinking_config=thinking_config,
+                                        safety_settings=self.safety_settings
+                                    )
+                                )
+                            else:
+                                raise search_err
+
+                        raw_text = response.text if response.text else "k."
+                        if re.search(r'\[REPLYING TO|\[[^\]]+\]\s*:', raw_text, re.IGNORECASE):
+                            raise ValueError("Model echoed transcript formatting")
+                        
+                        sanitized_text = self._sanitize_output(raw_text)
+                        if sanitized_text and "as an ai" not in sanitized_text:
+                            if self.current_key_index != idx:
+                                self.current_key_index = idx
+                            return sanitized_text
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        error_msg = str(e).lower()
+                        print(f"Model {model_name} failed with Key #{idx + 1}: {e}")
+                        is_rate_limit = any(err in error_msg for err in ["429", "500", "503", "quota", "exhausted", "internal"])
+                        if is_rate_limit:
+                            if self.current_key_index == idx:
+                                self._rotate_client()
+                            await asyncio.sleep(1 + attempt)
+                raise RuntimeError(f"Model {model_name} failed on all keys.")
+
+            tasks = [asyncio.create_task(query_single_gemini_model(m)) for m in models_to_try]
+            done_any = False
+            gemini_result = None
+            
+            for completed_task in asyncio.as_completed(tasks):
+                try:
+                    res = await completed_task
+                    if res and not done_any:
+                        done_any = True
+                        gemini_result = res
+                        for t in tasks:
+                            if not t.done():
+                                t.cancel()
+                        break
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    print(f"Concurrent Gemini model task failed: {e}")
+                    
+            if gemini_result:
+                self._update_memory(channel_id, gemini_result)
+                return gemini_result
+
+        # 2. Try Groq AI next as PRIMARY FALLBACK
+        if not attachments and self.groq_api_keys:
+            for g_model in self.groq_fallback_models:
+                try:
+                    groq_prompt = user_message
+                    raw_text = await self._get_groq_response(groq_prompt, system_prompt=full_system_instruction, model=g_model, temperature=1.0)
+                    if re.search(r'\[REPLYING TO|\[[^\]]+\]\s*:', raw_text, re.IGNORECASE):
+                        raise ValueError("Model echoed transcript formatting")
+                    
+                    sanitized_text = self._sanitize_output(raw_text)
+                    if sanitized_text and "as an ai" not in sanitized_text:
+                        self._update_memory(channel_id, sanitized_text)
+                        return sanitized_text
+                except Exception as e:
+                    print(f"Groq model {g_model} failed, trying next: {e}")
+
+        # 3. Try Cloudflare Workers AI next
         if not attachments and self.cloudflare_keys and self.cloudflare_account_id:
             for cf_model in self.cloudflare_models:
                 try:
@@ -1083,7 +1193,7 @@ INSTRUCTIONS:
                 except Exception as e:
                     print(f"Cloudflare model {cf_model} failed, trying next: {e}")
 
-        # 2. Try SiliconFlow next
+        # 4. Try SiliconFlow next
         if self.silicon_keys and time.time() > self.silicon_disabled_until:
             try:
                 silicon_messages = []
@@ -1108,7 +1218,6 @@ INSTRUCTIONS:
                 else:
                     silicon_messages.append({"role": "user", "content": user_message})
 
-                # Define models to query: only vision models if attachments are present
                 if attachments:
                     models_to_query = [
                         "deepseek-ai/DeepSeek-V4-Flash",
@@ -1118,7 +1227,6 @@ INSTRUCTIONS:
                 else:
                     models_to_query = self.silicon_models
 
-                # Define concurrent query for SiliconFlow models
                 async def query_silicon_model(model_name):
                     if time.time() < self.silicon_disabled_until:
                         raise RuntimeError("SiliconFlow balance insufficient")
@@ -1147,11 +1255,8 @@ INSTRUCTIONS:
                                         data = await resp.json()
                                         if "choices" in data and len(data["choices"]) > 0:
                                             raw_text = data["choices"][0]["message"]["content"].strip()
-                                            
-                                            # Check for transcript mirroring glitch
                                             if re.search(r'\[REPLYING TO|\[[^\]]+\]\s*:', raw_text, re.IGNORECASE):
                                                 raise ValueError("Model echoed transcript formatting")
-                                            
                                             sanitized_text = self._sanitize_output(raw_text)
                                             if sanitized_text and "as an ai" not in sanitized_text:
                                                 if self.current_silicon_key_index != idx:
@@ -1188,7 +1293,6 @@ INSTRUCTIONS:
                             await asyncio.sleep(0.5)
                     raise RuntimeError(f"SiliconFlow model {model_name} failed on all keys.")
 
-                # Execute concurrently
                 silicon_tasks = [asyncio.create_task(query_silicon_model(m)) for m in models_to_query]
                 done_any = False
                 silicon_result = None
@@ -1199,7 +1303,6 @@ INSTRUCTIONS:
                         if res and not done_any:
                             done_any = True
                             silicon_result = res
-                            # Cancel all other tasks
                             for t in silicon_tasks:
                                 if not t.done():
                                     t.cancel()
@@ -1220,7 +1323,7 @@ INSTRUCTIONS:
             except Exception as e:
                 print(f"SiliconFlow overall pipeline failed: {e}")
 
-        # 3. Try Cerebras AI next
+        # 5. Try Cerebras AI next
         if not attachments and self.cerebras_keys:
             try:
                 cerebras_messages = []
@@ -1232,7 +1335,6 @@ INSTRUCTIONS:
                 cerebras_messages.append({"role": "user", "content": user_message})
                 
                 raw_text = await self._get_cerebras_response(cerebras_messages, model="gpt-oss-120b", temperature=1.05)
-                # Check for transcript mirroring glitch and reject to trigger fallback
                 if re.search(r'\[REPLYING TO|\[[^\]]+\]\s*:', raw_text, re.IGNORECASE):
                     raise ValueError("Model echoed transcript formatting")
                 
@@ -1241,95 +1343,8 @@ INSTRUCTIONS:
                     self._update_memory(channel_id, sanitized_text)
                     return sanitized_text
             except Exception as e:
-                print(f"Cerebras default model failed, falling back to Groq/Gemini: {e}")
+                print(f"Cerebras default model failed: {e}")
 
-        # 4. Try Groq AI next
-        if not attachments and self.groq_api_keys:
-            try:
-                groq_prompt = user_message
-                raw_text = await self._get_groq_response(groq_prompt, system_prompt=full_system_instruction, model=self.groq_model, temperature=1.0)
-                if re.search(r'\[REPLYING TO|\[[^\]]+\]\s*:', raw_text, re.IGNORECASE):
-                    raise ValueError("Model echoed transcript formatting")
-                
-                sanitized_text = self._sanitize_output(raw_text)
-                if sanitized_text and "as an ai" not in sanitized_text:
-                    self._update_memory(channel_id, sanitized_text)
-                    return sanitized_text
-            except Exception as e:
-                print(f"Groq primary model failed, falling back to Gemini: {e}")
-
-        models_to_try = ["gemma-4-31b-it", "gemma-4-26b-a4b-it", "gemini-3.6-flash", "gemini-3.1-flash-lite"]
-
-        async def query_single_model(model_name):
-            num_clients = len(self.clients)
-            for attempt in range(num_clients):
-                idx = (self.current_key_index + attempt) % num_clients
-                client = self.clients[idx]
-                try:
-                    is_gemma = "gemma" in model_name.lower()
-                    tools = None
-                    if not is_gemma and bot_config.get("google_search_enabled", True):
-                        tools = [{"google_search": {}}]
-                        
-                    # Set minimal thinking for Gemini models
-                    thinking_config = types.ThinkingConfig(thinking_level="MINIMAL")
-                        
-                    response = await self._generate_content_safe(
-                        client,
-                        model=model_name,
-                        contents=contents,
-                        config=types.GenerateContentConfig(
-                            temperature=1.05,
-                            system_instruction=full_system_instruction,
-                            tools=tools,
-                            thinking_config=thinking_config,
-                            safety_settings=self.safety_settings
-                        )
-                    )
-                    raw_text = response.text if response.text else "k."
-                    # Check for transcript mirroring glitch
-                    if re.search(r'\[REPLYING TO|\[[^\]]+\]\s*:', raw_text, re.IGNORECASE):
-                        raise ValueError("Model echoed transcript formatting")
-                    
-                    sanitized_text = self._sanitize_output(raw_text)
-                    if sanitized_text and "as an ai" not in sanitized_text:
-                        return sanitized_text
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    error_msg = str(e).lower()
-                    print(f"Model {model_name} failed with Key #{idx + 1}: {e}")
-                    is_rate_limit = any(err in error_msg for err in ["429", "500", "503", "quota", "exhausted", "internal"])
-                    if is_rate_limit:
-                        if self.current_key_index == idx:
-                            self._rotate_client()
-                        await asyncio.sleep(1 + attempt)
-            raise RuntimeError(f"Model {model_name} failed on all keys.")
-
-        tasks = [asyncio.create_task(query_single_model(m)) for m in models_to_try]
-        done_any = False
-        result_text = None
-        
-        for completed_task in asyncio.as_completed(tasks):
-            try:
-                res = await completed_task
-                if res and not done_any:
-                    done_any = True
-                    result_text = res
-                    # Cancel all other tasks
-                    for t in tasks:
-                        if not t.done():
-                            t.cancel()
-                    break
-            except asyncio.CancelledError:
-                pass
-            except Exception as e:
-                print(f"Concurrent model task failed: {e}")
-                
-        if result_text:
-            self._update_memory(channel_id, result_text)
-            return result_text
-            
         return "discord is glitching or smth... talk later."
 
     async def generate_unprompted_message(self, channel_id: str = "default") -> str:
@@ -1340,49 +1355,8 @@ INSTRUCTIONS:
         system_prompt += f"\n[CURRENT PSYCHOLOGICAL STATE]\n[MOOD: BORED] You are bored and nobody has talked in a while. You are sending a message unprompted because you're bored.\n"
         system_prompt += "\n[CONTEXT: UNPROMPTED MESSAGE]\nYou are sending a message into the chat because nobody has talked in a while and you're bored. DO NOT greet anyone specific. DO NOT say 'hello' or 'hey guys'. Just drop a random thought, complaint, question, or observation. Keep it to ONE short sentence max. Be natural.\n"
         
-        # 1. Try Cloudflare Workers AI first
-        if self.cloudflare_keys and self.cloudflare_account_id:
-            for cf_model in self.cloudflare_models:
-                try:
-                    messages = [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": "[SYSTEM: Generate an unprompted bored message. No greeting. Just a random thought.]"}
-                    ]
-                    raw_text = await self._get_cloudflare_response(messages, model=cf_model, temperature=1.0)
-                    if raw_text:
-                        return self._sanitize_output(raw_text)
-                except Exception as e:
-                    print(f"Cloudflare unprompted generation failed with {cf_model}: {e}")
-
-        # 2. Try SiliconFlow next
-        if self.silicon_keys and time.time() > self.silicon_disabled_until:
-            try:
-                messages = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": "[SYSTEM: Generate an unprompted bored message. No greeting. Just a random thought.]"}
-                ]
-                chosen_model = random.choice(self.silicon_models)
-                raw_text = await self._get_silicon_response(messages, model=chosen_model, temperature=1.0)
-                if raw_text:
-                    return self._sanitize_output(raw_text)
-            except Exception as e:
-                print(f"SiliconFlow unprompted generation failed: {e}. Falling back to Cerebras/Gemini.")
-
-        # 3. Try Cerebras next
-        if self.cerebras_keys:
-            try:
-                messages = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": "[SYSTEM: Generate an unprompted bored message. No greeting. Just a random thought.]"}
-                ]
-                raw_text = await self._get_cerebras_response(messages, model="gpt-oss-120b", temperature=1.0)
-                if raw_text:
-                    return self._sanitize_output(raw_text)
-            except Exception as e:
-                print(f"Cerebras unprompted generation failed: {e}. Falling back to Gemini.")
-
+        # 1. Try Google Gemini first as MAIN MODEL
         contents = [types.Content(role="user", parts=[types.Part.from_text(text="[SYSTEM: Generate an unprompted bored message. No greeting. Just a random thought.]")])]  
-        
         for attempt in range(len(self.clients)):
             client = self._get_current_client()
             try:
@@ -1401,9 +1375,66 @@ INSTRUCTIONS:
                 if raw_text:
                     return self._sanitize_output(raw_text)
             except Exception as e:
-                print(f"Unprompted generation failed: {e}")
+                print(f"Unprompted Gemini generation failed: {e}")
                 self._rotate_client()
                 continue
+
+        # 2. Try Groq AI next
+        if self.groq_api_keys:
+            for g_model in self.groq_fallback_models:
+                try:
+                    raw_text = await self._get_groq_response(
+                        "[SYSTEM: Generate an unprompted bored message. No greeting. Just a random thought.]",
+                        system_prompt=system_prompt,
+                        model=g_model,
+                        temperature=1.0
+                    )
+                    if raw_text:
+                        return self._sanitize_output(raw_text)
+                except Exception as e:
+                    print(f"Groq unprompted generation failed with {g_model}: {e}")
+
+        # 3. Try Cloudflare Workers AI next
+        if self.cloudflare_keys and self.cloudflare_account_id:
+            for cf_model in self.cloudflare_models:
+                try:
+                    messages = [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": "[SYSTEM: Generate an unprompted bored message. No greeting. Just a random thought.]"}
+                    ]
+                    raw_text = await self._get_cloudflare_response(messages, model=cf_model, temperature=1.0)
+                    if raw_text:
+                        return self._sanitize_output(raw_text)
+                except Exception as e:
+                    print(f"Cloudflare unprompted generation failed with {cf_model}: {e}")
+
+        # 4. Try SiliconFlow next
+        if self.silicon_keys and time.time() > self.silicon_disabled_until:
+            try:
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": "[SYSTEM: Generate an unprompted bored message. No greeting. Just a random thought.]"}
+                ]
+                chosen_model = random.choice(self.silicon_models)
+                raw_text = await self._get_silicon_response(messages, model=chosen_model, temperature=1.0)
+                if raw_text:
+                    return self._sanitize_output(raw_text)
+            except Exception as e:
+                print(f"SiliconFlow unprompted generation failed: {e}. Falling back to Cerebras.")
+
+        # 5. Try Cerebras next
+        if self.cerebras_keys:
+            try:
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": "[SYSTEM: Generate an unprompted bored message. No greeting. Just a random thought.]"}
+                ]
+                raw_text = await self._get_cerebras_response(messages, model="gpt-oss-120b", temperature=1.0)
+                if raw_text:
+                    return self._sanitize_output(raw_text)
+            except Exception as e:
+                print(f"Cerebras unprompted generation failed: {e}")
+
         return None
 
     async def generate_story(self):
@@ -1411,49 +1442,8 @@ INSTRUCTIONS:
         system_prompt = self._get_base_prompt()
         system_prompt += "\n[CONTEXT: INSTAGRAM STORY]\nYou are posting a picture to your story. Write a tiny, 1-4 word caption (lowercase). Examples: 'finally', 'so bored', 'food', 'night', 'tired af', 'why am i awake'.\nCRITICAL: You MUST include `[fetch_web: selfie]` or `[fetch_web: aesthetic]` or `[fetch_web: food]` at the end of your caption to attach an image. NO other text.\n"
         
-        # 1. Try Cloudflare Workers AI first
-        if self.cloudflare_keys and self.cloudflare_account_id:
-            for cf_model in self.cloudflare_models:
-                try:
-                    messages = [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": "[SYSTEM: Generate a story caption with a fetch_web tag.]"}
-                    ]
-                    raw_text = await self._get_cloudflare_response(messages, model=cf_model, temperature=1.0)
-                    if raw_text:
-                        return self._sanitize_output(raw_text)
-                except Exception as e:
-                    print(f"Cloudflare story generation failed with {cf_model}: {e}")
-
-        # 2. Try SiliconFlow next
-        if self.silicon_keys and time.time() > self.silicon_disabled_until:
-            try:
-                messages = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": "[SYSTEM: Generate a story caption with a fetch_web tag.]"}
-                ]
-                chosen_model = random.choice(self.silicon_models)
-                raw_text = await self._get_silicon_response(messages, model=chosen_model, temperature=1.0)
-                if raw_text:
-                    return self._sanitize_output(raw_text)
-            except Exception as e:
-                print(f"SiliconFlow story generation failed: {e}. Falling back to Cerebras/Gemini.")
-
-        # 3. Try Cerebras next
-        if self.cerebras_keys:
-            try:
-                messages = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": "[SYSTEM: Generate a story caption with a fetch_web tag.]"}
-                ]
-                raw_text = await self._get_cerebras_response(messages, model="gpt-oss-120b", temperature=1.0)
-                if raw_text:
-                    return self._sanitize_output(raw_text)
-            except Exception as e:
-                print(f"Cerebras story generation failed: {e}. Falling back to Gemini.")
-
+        # 1. Try Google Gemini first as MAIN MODEL
         contents = [types.Content(role="user", parts=[types.Part.from_text(text="[SYSTEM: Generate a story caption with a fetch_web tag.]")])]  
-        
         for attempt in range(len(self.clients)):
             client = self._get_current_client()
             try:
@@ -1473,9 +1463,66 @@ INSTRUCTIONS:
                 if raw_text:
                     return self._sanitize_output(raw_text)
             except Exception as e:
-                print(f"Story generation failed: {e}")
+                print(f"Story generation failed with Gemini: {e}")
                 self._rotate_client()
                 continue
+
+        # 2. Try Groq AI next
+        if self.groq_api_keys:
+            for g_model in self.groq_fallback_models:
+                try:
+                    raw_text = await self._get_groq_response(
+                        "[SYSTEM: Generate a story caption with a fetch_web tag.]",
+                        system_prompt=system_prompt,
+                        model=g_model,
+                        temperature=1.0
+                    )
+                    if raw_text:
+                        return self._sanitize_output(raw_text)
+                except Exception as e:
+                    print(f"Groq story generation failed with {g_model}: {e}")
+
+        # 3. Try Cloudflare Workers AI next
+        if self.cloudflare_keys and self.cloudflare_account_id:
+            for cf_model in self.cloudflare_models:
+                try:
+                    messages = [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": "[SYSTEM: Generate a story caption with a fetch_web tag.]"}
+                    ]
+                    raw_text = await self._get_cloudflare_response(messages, model=cf_model, temperature=1.0)
+                    if raw_text:
+                        return self._sanitize_output(raw_text)
+                except Exception as e:
+                    print(f"Cloudflare story generation failed with {cf_model}: {e}")
+
+        # 4. Try SiliconFlow next
+        if self.silicon_keys and time.time() > self.silicon_disabled_until:
+            try:
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": "[SYSTEM: Generate a story caption with a fetch_web tag.]"}
+                ]
+                chosen_model = random.choice(self.silicon_models)
+                raw_text = await self._get_silicon_response(messages, model=chosen_model, temperature=1.0)
+                if raw_text:
+                    return self._sanitize_output(raw_text)
+            except Exception as e:
+                print(f"SiliconFlow story generation failed: {e}. Falling back to Cerebras.")
+
+        # 5. Try Cerebras next
+        if self.cerebras_keys:
+            try:
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": "[SYSTEM: Generate a story caption with a fetch_web tag.]"}
+                ]
+                raw_text = await self._get_cerebras_response(messages, model="gpt-oss-120b", temperature=1.0)
+                if raw_text:
+                    return self._sanitize_output(raw_text)
+            except Exception as e:
+                print(f"Cerebras story generation failed: {e}")
+
         return None
 
     async def get_truth_or_dare(self, mode: str) -> str:

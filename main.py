@@ -30,56 +30,6 @@ import db
 import bot_config
 import games
 from PIL import Image
-from akinator import AsyncAkinator
-import akinator
-
-# Apply patch to akinator library's AsyncClient.__handler due to missing 'akitude' in modern Akinator API response
-async def _patched_handler(self, response):
-    response.raise_for_status()
-    try:
-        data = response.json()
-    except Exception as e:
-        if "A technical problem has ocurred." in response.text:
-            raise RuntimeError("A technical problem has occurred. Please try again later.") from e
-        raise RuntimeError("Failed to parse the response as JSON.") from e
-
-    if "completion" not in data:
-        data["completion"] = self.completion
-    if data["completion"] == "KO - TIMEOUT":
-        raise RuntimeError("The session has timed out. Please start a new game.")
-    if data["completion"] == "SOUNDLIKE":
-        self.finished = True
-        self.win = True
-        if not self.id_proposition:
-            await self.defeat()
-    elif "id_proposition" in data:
-        self.win = True
-        self.id_proposition = data["id_proposition"]
-        self.name_proposition = data["name_proposition"]
-        self.description_proposition = data["description_proposition"]
-        self.step_last_proposition = self.step
-        self.pseudo = data.get("pseudo")
-        self.flag_photo = data.get("flag_photo")
-        self.photo = data.get("photo")
-    else:
-        self.akitude = data.get("akitude", "defi.png")
-        self.step = int(data["step"])
-        self.progression = float(data["progression"])
-        self.question = data["question"]
-    self.completion = data["completion"]
-
-akinator.AsyncClient._AsyncClient__handler = _patched_handler
-
-# Apply patch to akinator library's AsyncCloudScraper.post to prevent indefinite hangs by forcing a default timeout
-_original_post = akinator.async_client.AsyncCloudScraper.post
-
-async def _patched_post(self, url, data=None, json=None, **kwargs):
-    if 'timeout' not in kwargs:
-        kwargs['timeout'] = 5  # default 5 second timeout
-    return await _original_post(self, url, data=data, json=json, **kwargs)
-
-akinator.async_client.AsyncCloudScraper.post = _patched_post
-
 
 # Load environment variables
 load_dotenv()
@@ -89,6 +39,9 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('discord')
 logger.setLevel(logging.INFO)
+logging.getLogger('google_genai').setLevel(logging.ERROR)
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('httpcore').setLevel(logging.WARNING)
 
 # Initialize Discord bot
 intents = discord.Intents.default()
@@ -1444,8 +1397,7 @@ def get_help_embed(category: str, bot_user=None) -> discord.Embed:
         )
         embed.add_field(
             name="🎮 Games & AI",
-            value="• `$akinator` ─ Play Akinator directly in chat using buttons.\n"
-                  "• `$choose [opt1 | opt2]` ─ Let Reze choose between options.\n"
+            value="• `$choose [opt1 | opt2]` ─ Let Reze choose between options.\n"
                   "• `$quote [@user] [text] / [reply]` ─ Generate a premium cinematic quote card.\n"
                   "• `$truth` / `$dare` ─ Play a game of Truth or Dare powered by AI (Llama 3.3).\n"
                   "• `$wyr` / `$wouldyourather` ─ Play a game of Would You Rather with voting.",
@@ -1599,7 +1551,7 @@ def get_help_embed(category: str, bot_user=None) -> discord.Embed:
             name="📖 Command Categories",
             value="🛠️ `General & Utility` ─ Basic lookup, shipping, search, uptime.\n"
                   "⚙️ `Interactive Utilities` ─ Weather, polling.\n"
-                  "🎭 `Interactive & Fun` ─ Games, Wanted posters, Gandhi quotes, Jail, Akinator, and RIP cards.\n"
+                  "🎭 `Interactive & Fun` ─ Games, Wanted posters, Gandhi quotes, Jail, and RIP cards.\n"
                   "👪 `E-Family System` ─ Marry, adopt, divorce, family trees.\n"
                   "👉 `Emotes & Actions` ─ Affection, Expression, Playful, and Chaos action emojis.",
             inline=False
@@ -1792,249 +1744,6 @@ class WaifuVotingView(discord.ui.View):
                 await self.message.edit(view=self)
         except Exception:
             pass
-
-
-
-
-async def fetch_free_proxies():
-    urls = [
-        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=3000&country=all&ssl=yes&anonymity=anonymous",
-        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
-        "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt"
-    ]
-    proxies = set()
-    try:
-        async with aiohttp.ClientSession() as session:
-            for url in urls:
-                try:
-                    async with session.get(url, timeout=5) as r:
-                        if r.status == 200:
-                            text = await r.text()
-                            for line in text.split("\n"):
-                                line = line.strip()
-                                if line and not line.startswith("#"):
-                                    if ":" in line:
-                                        proxies.add(line)
-                except Exception as url_err:
-                    logger.warning(f"Failed to fetch proxies from {url}: {url_err}")
-    except Exception as e:
-        logger.warning(f"Failed to fetch proxies pool: {e}")
-    return list(proxies)
-
-
-class AkinatorView(discord.ui.View):
-    def __init__(self, author):
-        super().__init__(timeout=90.0)
-        self.author = author
-        self.aki = AsyncAkinator()
-        self.message = None
-        # Find and disable the Undo button initially
-        for child in self.children:
-            if child.label == "Undo":
-                child.disabled = True
-        
-    async def start(self):
-        try:
-            # First attempt: direct connection
-            await self.aki.start_game()
-            return self.aki.question
-        except Exception as direct_err:
-            logger.warning(f"Direct connection to Akinator failed: {direct_err}. Attempting concurrent proxy fallback...")
-            
-            # Fetch free proxies
-            proxies = await fetch_free_proxies()
-            if not proxies:
-                raise direct_err
-                
-            # Randomize proxy selection
-            import random
-            random.shuffle(proxies)
-            
-            # Dynamically adjust default executor pool limit to prevent thread queuing
-            import concurrent.futures
-            try:
-                loop = asyncio.get_running_loop()
-                loop.set_default_executor(concurrent.futures.ThreadPoolExecutor(max_workers=100))
-            except Exception as thread_err:
-                logger.warning(f"Could not adjust default threadpool executor: {thread_err}")
-            
-            # Helper to try game start for a single proxy
-            async def try_proxy(proxy_str):
-                proxy_url = f"http://{proxy_str}"
-                aki = AsyncAkinator()
-                aki.session.scraper.proxies = {
-                    "http": proxy_url,
-                    "https": proxy_url
-                }
-                aki.session.scraper.timeout = 5
-                await aki.start_game()
-                return aki, proxy_str
-
-            # Launch up to 40 proxy test tasks concurrently
-            test_pool = proxies[:40]
-            tasks = [asyncio.create_task(try_proxy(p)) for p in test_pool]
-            
-            completed_aki = None
-            successful_proxy = None
-            
-            for future in asyncio.as_completed(tasks):
-                try:
-                    aki_instance, proxy_str = await future
-                    completed_aki = aki_instance
-                    successful_proxy = proxy_str
-                    logger.info(f"Successfully started Akinator game using proxy: {proxy_str}")
-                    break  # Found a working one, stop waiting
-                except Exception:
-                    pass  # Ignore failing proxies
-            
-            # Cancel all other pending tasks
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            
-            if completed_aki:
-                self.aki = completed_aki
-                return self.aki.question
-            
-            # If all proxies fail, raise the original direct connection error
-            raise direct_err
-
-    async def process_answer(self, interaction: discord.Interaction, answer_val):
-        if interaction.user.id != self.author.id:
-            await interaction.response.send_message("this is not your game, dummy 🙄", ephemeral=True)
-            return
-            
-        await interaction.response.defer()
-        
-        try:
-            if answer_val == "back":
-                await self.aki.back()
-            else:
-                await self.aki.answer(answer_val)
-                
-            # Check if game is finished (victory or defeat)
-            if self.aki.finished:
-                if self.aki.win:
-                    embed = discord.Embed(
-                        title="🔮 Akinator Wins! 🔮",
-                        description=f"I guessed it! It was **{self.aki.name_proposition}**!\n\n*{self.aki.question}*",
-                        color=discord.Color.from_rgb(212, 175, 230)
-                    )
-                    if self.aki.photo:
-                        embed.set_image(url=self.aki.photo)
-                else:
-                    embed = discord.Embed(
-                        title="🔮 You Defeated Akinator! 🔮",
-                        description=self.aki.question,
-                        color=discord.Color.from_rgb(212, 175, 230)
-                    )
-                
-                for child in self.children:
-                    child.disabled = True
-                await interaction.followup.edit_message(message_id=self.message.id, embed=embed, view=self)
-                self.stop()
-                return
-
-            # Check if Akinator is making a guess
-            if self.aki.win:
-                embed = discord.Embed(
-                    title="🔮 Akinator's Guess! 🔮",
-                    description=f"Is it **{self.aki.name_proposition}**?\n*{self.aki.description_proposition}*",
-                    color=discord.Color.from_rgb(212, 175, 230)
-                )
-                if self.aki.photo:
-                    embed.set_image(url=self.aki.photo)
-                
-                for child in self.children:
-                    if child.label in ["Yes", "No", "Stop"]:
-                        child.disabled = False
-                    else:
-                        child.disabled = True
-                
-                await interaction.followup.edit_message(message_id=self.message.id, embed=embed, view=self)
-                return
-
-            # Otherwise, show next question
-            for child in self.children:
-                if child.label == "Undo" and self.aki.step == 0:
-                    child.disabled = True
-                else:
-                    child.disabled = False
-                    
-            embed = discord.Embed(
-                title=f"🔮 Akinator (Question {self.aki.step + 1}) 🔮",
-                description=f"### {self.aki.question}",
-                color=discord.Color.from_rgb(212, 175, 230)
-            )
-            embed.set_footer(text=f"Progression: {int(self.aki.progression)}% | Playing: {self.author.display_name}")
-            await interaction.followup.edit_message(message_id=self.message.id, embed=embed, view=self)
-            
-        except Exception as e:
-            logger.error(f"Akinator error: {e}", exc_info=True)
-            await interaction.followup.send("something went wrong with the Akinator API 😭", ephemeral=True)
-
-    @discord.ui.button(label="Yes", style=discord.ButtonStyle.success, row=0)
-    async def yes(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.process_answer(interaction, "yes")
-
-    @discord.ui.button(label="No", style=discord.ButtonStyle.danger, row=0)
-    async def no(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.process_answer(interaction, "no")
-
-    @discord.ui.button(label="I Don't Know", style=discord.ButtonStyle.secondary, row=0)
-    async def idk(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.process_answer(interaction, "i don't know")
-
-    @discord.ui.button(label="Probably", style=discord.ButtonStyle.primary, row=1)
-    async def probably(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.process_answer(interaction, "probably")
-
-    @discord.ui.button(label="Probably Not", style=discord.ButtonStyle.primary, row=1)
-    async def probably_not(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.process_answer(interaction, "probably not")
-
-    @discord.ui.button(label="Undo", style=discord.ButtonStyle.secondary, row=2)
-    async def undo(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.aki.step == 0:
-            await interaction.response.send_message("you can't go back any further!", ephemeral=True)
-            return
-        await self.process_answer(interaction, "back")
-
-    @discord.ui.button(label="Stop", style=discord.ButtonStyle.danger, row=2)
-    async def stop_game(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.author.id:
-            await interaction.response.send_message("this is not your game, dummy 🙄", ephemeral=True)
-            return
-        for child in self.children:
-            child.disabled = True
-        embed = discord.Embed(
-            title="🔮 Akinator Game Stopped 🔮",
-            description="The game was stopped by the player.",
-            color=discord.Color.from_rgb(120, 120, 120)
-        )
-        try:
-            await interaction.response.edit_message(embed=embed, view=self)
-        except Exception as e:
-            logger.warning(f"Failed to edit message on stop_game: {e}")
-        self.stop()
-
-    async def on_timeout(self):
-        for child in self.children:
-            child.disabled = True
-        try:
-            if self.message:
-                embed = discord.Embed(
-                    title="🔮 Akinator Timeout 🔮",
-                    description="The game has timed out due to inactivity.",
-                    color=discord.Color.from_rgb(120, 120, 120)
-                )
-                await self.message.edit(embed=embed, view=self)
-        except Exception:
-            pass
-
-    async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item) -> None:
-        # Quietly log any transient interaction or network errors
-        logger.warning(f"AkinatorView button '{item.label}' callback error: {error}")
 
 
 # --- E-FAMILY HELPERS ---
@@ -3469,24 +3178,6 @@ async def on_message(message):
                         await message.reply("something went wrong while putting them to rest 😭")
                 return
 
-            elif command == "akinator":
-                async with message.channel.typing():
-                    try:
-                        view = AkinatorView(message.author)
-                        question = await view.start()
-                        
-                        embed = discord.Embed(
-                            title="🔮 Akinator (Question 1) 🔮",
-                            description=f"### {question}",
-                            color=discord.Color.from_rgb(212, 175, 230)
-                        )
-                        embed.set_footer(text=f"Progression: 0% | Playing: {message.author.display_name}")
-                        
-                        reply_msg = await message.reply(embed=embed, view=view)
-                        view.message = reply_msg
-                    except Exception as e:
-                        logger.error(f"Akinator start error: {e}", exc_info=True)
-                        await message.reply("couldn't start the Akinator game right now 😭")
             elif command in ["wyr", "wouldyourather"]:
                 async with message.channel.typing():
                     try:

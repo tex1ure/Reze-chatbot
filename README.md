@@ -43,7 +43,6 @@ the bot doesn't rely on just one AI provider. it includes built-in failovers and
 * `$poll [question] | [opt1] | [opt2]` - create interactive reaction polls.
 
 ### Interactive Games & Fun
-* `$akinator` - play Akinator directly in discord chat using buttons.
 * `$choose [opt1 | opt2]` - let the bot pick between choices.
 * `$quote [@user] [text]` - generate a cinematic quote card image.
 * `$truth` / `$dare` - play Truth or Dare powered by Llama 3.3.

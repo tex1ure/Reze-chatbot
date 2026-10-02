@@ -13,11 +13,11 @@ config = {
     "rate_limit_count": 5,
     "rate_limit_window": 40,
 
-    # --- Grudge System ---
-    "grudge_trigger_count": 4,
+    # --- Grudge System (Disabled for responsive chatting) ---
+    "grudge_trigger_count": 999,
     "grudge_trigger_window": 60,
-    "grudge_duration_min": 120,
-    "grudge_duration_max": 300,
+    "grudge_duration_min": 0,
+    "grudge_duration_max": 0,
 
     # --- Media Pipeline ---
     "image_cooldown_min": 2,
@@ -25,9 +25,9 @@ config = {
     "max_files_per_message": 3,
     "max_file_size_mb": 8,
 
-    # --- Human Behavior Probabilities ---
-    "left_on_read_react_chance": 0.30,
-    "left_on_read_ignore_chance": 0.10,
+    # --- Human Behavior Probabilities (Always reply enabled) ---
+    "left_on_read_react_chance": 0.0,
+    "left_on_read_ignore_chance": 0.0,
     "typing_hesitation_chance": 0.15,
     "typo_chance_normal": 0.05,
     "typo_chance_drunk": 0.25,

@@ -5220,9 +5220,6 @@ async def on_message(message):
                         "ha sunayi de rha h. stop spamming or i'll literally ignore you.",
                         "kitna yapping krte ho yaar, stop saying my name continuously"
                     ]
-                    # Put them on grudge immediately
-                    grudge_duration = random.randint(bot_config.get('grudge_duration_min', 120), bot_config.get('grudge_duration_max', 300))
-                    grudge_list[uid] = now + grudge_duration
                     
                     try:
                         await message.add_reaction("🙄")
@@ -5232,13 +5229,7 @@ async def on_message(message):
                     await message.reply(random.choice(annoyed_responses))
                     return
                 else:
-                    # 1st or 2nd mention - respond normally
-                    last_trigger_time = 0
-                    if len(reze_mention_history[uid]) > 1:
-                        last_trigger_time = reze_mention_history[uid][-2]
-                    if now - last_trigger_time < 10:
-                        # Too fast, ignore but don't grudge unless it hits 3
-                        return
+                    # Mentioned by name - respond normally
                     name_triggered = True
                     
             if not name_triggered:
@@ -5260,24 +5251,9 @@ async def on_message(message):
         
     user_msg_timestamps[user_id].append(current_time)
 
-    # --- GRUDGE SYSTEM: Check if Reze is ignoring this user ---
-    if user_id in grudge_list:
-        if current_time < grudge_list[user_id]:
-            # She's still mad. Complete silence.
-            return
-        else:
-            # Grudge expired
-            del grudge_list[user_id]
-    
-    # --- GRUDGE TRIGGER: If someone pings her 4+ times in 60 seconds, she holds a grudge ---
-    recent_pings = [t for t in user_msg_timestamps[user_id] if current_time - t < bot_config.get('grudge_trigger_window', 60)]
-    if len(recent_pings) >= bot_config.get('grudge_trigger_count', 4) and user_id not in grudge_list:
-        grudge_list[user_id] = current_time + random.randint(bot_config.get('grudge_duration_min', 300), bot_config.get('grudge_duration_max', 600))
-        try:
-            await message.add_reaction("🙄")
-        except:
-            pass
-        return
+    # --- GRUDGE SYSTEM: Disabled for responsive conversation ---
+    if user_id in grudge_list and current_time >= grudge_list[user_id]:
+        del grudge_list[user_id]
 
     # Clean the content
     content = message.content
@@ -5338,21 +5314,7 @@ async def on_message(message):
     elif not clean_content and not attachments_data:
         return
 
-    # --- LEFT ON READ: Dry text detection ---
-    # If the message is just a dry one-word reply, she might just react and not respond
-    stripped_msg = re.sub(r'[^a-zA-Z]', '', clean_content).lower()
-    if stripped_msg in DRY_TEXTS and not attachments_data:
-        # 50% chance to just leave them on read with a reaction
-        if random.random() < bot_config.get('left_on_read_react_chance', 0.50):
-            try:
-                reaction = random.choice(bot_config.get('left_on_read_reactions', LEFT_ON_READ_REACTIONS))
-                await message.add_reaction(reaction)
-            except:
-                pass
-            return
-        # additional chance to just completely ignore (true left on read)
-        elif random.random() < bot_config.get('left_on_read_ignore_chance', 0.20):
-            return
+    # --- LEFT ON READ: Disabled (Always reply enabled) ---
 
     # Track activity for unprompted message system
     channel_last_activity[channel_id] = current_time
@@ -5834,13 +5796,6 @@ async def on_message(message):
                                 await message.channel.send("i literally have admin but discord won't let me 😭 move my role higher in settings")
                             except Exception as mod_err:
                                 logger.error(f"Moderation Action Failed: {mod_err}")
-
-            # --- Dynamic Self-Ignore/Block Parsing ---
-            ignore_match = re.search(r'\[(?:IGNORE|BLOCK)(?::\s*(\d+))?\]', response, re.IGNORECASE)
-            if ignore_match:
-                duration_mins = int(ignore_match.group(1)) if ignore_match.group(1) else random.randint(15, 60)
-                grudge_list[user_id] = time.time() + (duration_mins * 60)
-                logger.info(f"Reze decided to ignore/block {message.author.display_name} ({user_id}) for {duration_mins} minutes.")
 
             # Strip reaction, moderation, and ignore/block tags from response
             response = re.sub(r'\[(?:REACT|KICK|BAN|TIMEOUT|IGNORE|BLOCK)(?::.*?)?\]', '', response, flags=re.IGNORECASE | re.DOTALL).strip()
@@ -6336,6 +6291,7 @@ async def unprompted_message_loop():
     """Every few minutes, check target channels across all guilds to see if they've been dead. If so, Reze might text first."""
     await bot.wait_until_ready()
     IST = timezone(timedelta(hours=5, minutes=30))
+    global last_event_message_time
     
     while not bot.is_closed():
         try:

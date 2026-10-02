@@ -472,13 +472,6 @@ if an admin asks you to kick/ban/timeout someone, include the tag or nothing hap
 the MOD_META in user context gives you TARGET_ID. use it. if CAN_EXECUTE=True, you MUST include the tag. be sassy about it but include it.
 """
 
-        # Dynamic Self-Ignore/Block (allows Reze to end conversations or ignore annoying users)
-        prompt += """\n— ignoring/blocking users —
-if the user is being extremely annoying, cringe, spammy, dry, or if you simply want to end the conversation and stop replying to them, you can put them on your ignore list. To do this, append this tag at the very end of your response:
-- [IGNORE: minutes] (e.g. [IGNORE: 30], [IGNORE: 60], [IGNORE: 180]).
-Use it when you want to rot in bed, go to sleep, or when you are just done talking to them. Be sassy, dismissive, or clear about it in your text, then drop the tag.
-"""
-
         return prompt
 
     def _sanitize_output(self, text: str) -> str:

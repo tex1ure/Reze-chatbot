@@ -197,7 +197,7 @@ FALLBACK_MESSAGES = [
 
 # --- NEW: Strict MIME Types ---
 # We block weird formats like .mp4, PDFs, or raw binaries that would crash the API
-ALLOWED_MIME_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif"]
+ALLOWED_MIME_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif", "video/mp4"]
 
 # --- HUMAN BEHAVIOR SYSTEMS ---
 # Grudge list: users Reze is temporarily ignoring (user_id -> expiry timestamp)
@@ -2389,6 +2389,184 @@ async def get_family_tree_text(user_id: str, bot) -> str:
                     lines.append(f"{prefix}{gc_char} 🍼 {gc_name}")
                     
     return "\n".join(lines)
+
+
+async def resolve_message_media(msg: discord.Message) -> tuple[list[dict], str]:
+    """
+    Extracts visual media (images, GIFs, short videos) from a Discord message.
+    Handles:
+    - Direct file attachments (msg.attachments)
+    - Discord Embeds (Klipy, Tenor, Giphy, direct media)
+    - OpenGraph web scraping fallback for Klipy/Tenor/Giphy URLs
+    - Direct media links (.gif, .mp4, .webp, .png, .jpg)
+    
+    Returns:
+    (attachments_data, clean_content)
+    """
+    max_files = bot_config.get('max_files_per_message', 3)
+    max_size_mb = bot_config.get('max_file_size_mb', 12)
+    max_size_bytes = max_size_mb * 1024 * 1024
+    
+    attachments_data = []
+    
+    # 1. Process direct attachments
+    if hasattr(msg, "attachments"):
+        for att in msg.attachments:
+            if len(attachments_data) >= max_files:
+                break
+            if att.size <= max_size_bytes and att.content_type in ALLOWED_MIME_TYPES:
+                try:
+                    data = await att.read()
+                    attachments_data.append({"data": data, "mime_type": att.content_type})
+                except Exception as e:
+                    logger.warning(f"Failed to read attachment {att.filename}: {e}")
+
+    # Mentions replacement
+    raw_content = getattr(msg, "content", "") or ""
+    for mention in getattr(msg, "mentions", []):
+        raw_content = raw_content.replace(f"<@{mention.id}>", f"@{mention.display_name}").replace(f"<@!{mention.id}>", f"@{mention.display_name}")
+        
+    resolved_urls = []
+    found_urls = re.findall(r'https?://[^\s<>"]+', raw_content)
+    
+    if found_urls and len(attachments_data) < max_files:
+        current_msg = msg
+        # If Discord hasn't unfurled the embed yet, wait briefly and refetch
+        if not getattr(current_msg, "embeds", None) and hasattr(current_msg, "channel") and hasattr(current_msg.channel, "fetch_message") and hasattr(current_msg, "id"):
+            await asyncio.sleep(0.6)
+            try:
+                refetched = await current_msg.channel.fetch_message(current_msg.id)
+                if refetched and refetched.embeds:
+                    current_msg = refetched
+            except Exception:
+                pass
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            # A. Try embeds first (Discord's unfurled Klipy / Tenor / Giphy / Media embeds)
+            if hasattr(current_msg, "embeds"):
+                for embed in current_msg.embeds:
+                    if len(attachments_data) >= max_files:
+                        break
+                    media_url = None
+                    if embed.video and embed.video.url:
+                        media_url = embed.video.url
+                    elif embed.image and embed.image.url:
+                        media_url = embed.image.url
+                    elif embed.thumbnail and embed.thumbnail.url:
+                        media_url = embed.thumbnail.url
+
+                    if media_url:
+                        try:
+                            async with session.get(media_url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                                if resp.status == 200:
+                                    ct = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
+                                    if not ct or ct == "application/octet-stream":
+                                        m_low = media_url.lower()
+                                        if ".gif" in m_low: ct = "image/gif"
+                                        elif ".mp4" in m_low: ct = "video/mp4"
+                                        elif ".webp" in m_low: ct = "image/webp"
+                                        elif ".png" in m_low: ct = "image/png"
+                                        else: ct = "image/jpeg"
+                                    if ct in ALLOWED_MIME_TYPES:
+                                        data = await resp.read()
+                                        if len(data) <= max_size_bytes:
+                                            attachments_data.append({"data": data, "mime_type": ct})
+                                            if embed.url:
+                                                resolved_urls.append(embed.url)
+                                            for u in found_urls:
+                                                if u in (embed.url or "") or (embed.url and embed.url in u) or (embed.title and embed.title.lower() in u.lower()):
+                                                    resolved_urls.append(u)
+                        except Exception as e:
+                            logger.debug(f"Failed to fetch embed media from {media_url}: {e}")
+
+            # B. If still under limit, resolve URLs directly (Klipy, Tenor, Giphy, direct media)
+            for url in found_urls:
+                if len(attachments_data) >= max_files:
+                    break
+                if url in resolved_urls:
+                    continue
+                url_lower = url.lower()
+                
+                # Direct media URL
+                if re.search(r'\.(gif|mp4|webm|webp|png|jpe?g)(\?.*)?$', url_lower):
+                    try:
+                        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                            if resp.status == 200:
+                                ct = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
+                                if not ct or ct == "application/octet-stream":
+                                    if ".gif" in url_lower: ct = "image/gif"
+                                    elif ".mp4" in url_lower: ct = "video/mp4"
+                                    elif ".webp" in url_lower: ct = "image/webp"
+                                    elif ".png" in url_lower: ct = "image/png"
+                                    else: ct = "image/jpeg"
+                                if ct in ALLOWED_MIME_TYPES:
+                                    data = await resp.read()
+                                    if len(data) <= max_size_bytes:
+                                        attachments_data.append({"data": data, "mime_type": ct})
+                                        resolved_urls.append(url)
+                                        continue
+                    except Exception as e:
+                        logger.debug(f"Failed direct media download for {url}: {e}")
+
+                # Klipy / Tenor / Giphy / Imgur page scraper fallback
+                if any(domain in url_lower for domain in ["klipy.com", "klipy.co", "tenor.com", "giphy.com", "imgur.com"]):
+                    try:
+                        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                            if resp.status == 200:
+                                html = await resp.text()
+                                m_vid = re.search(r'<meta[^>]+(?:property|name)=["\'](?:og:video|og:video:url|twitter:player:stream)["\'][^>]+content=["\']([^"\']+)["\']', html, re.I)
+                                if not m_vid:
+                                    m_vid = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\'](?:og:video|og:video:url|twitter:player:stream)["\']', html, re.I)
+
+                                m_img = re.search(r'<meta[^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\'][^>]+content=["\']([^"\']+)["\']', html, re.I)
+                                if not m_img:
+                                    m_img = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\']', html, re.I)
+
+                                candidates = []
+                                if m_img: candidates.append(m_img.group(1))
+                                if m_vid: candidates.append(m_vid.group(1))
+                                candidates.sort(key=lambda c: 0 if any(ext in c.lower() for ext in ['.gif', '.mp4']) else 1)
+
+                                for target in candidates:
+                                    try:
+                                        async with session.get(target, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as m_resp:
+                                            if m_resp.status == 200:
+                                                ct = m_resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
+                                                if not ct or ct == "application/octet-stream":
+                                                    t_low = target.lower()
+                                                    if ".gif" in t_low: ct = "image/gif"
+                                                    elif ".mp4" in t_low: ct = "video/mp4"
+                                                    elif ".webp" in t_low: ct = "image/webp"
+                                                    elif ".png" in t_low: ct = "image/png"
+                                                    else: ct = "image/jpeg"
+                                                if ct in ALLOWED_MIME_TYPES:
+                                                    data = await m_resp.read()
+                                                    if len(data) <= max_size_bytes:
+                                                        attachments_data.append({"data": data, "mime_type": ct})
+                                                        resolved_urls.append(url)
+                                                        break
+                                    except Exception:
+                                        continue
+                    except Exception as e:
+                        logger.debug(f"Failed page media scraping for {url}: {e}")
+
+    # Clean resolved URLs from content
+    clean_text = raw_content
+    for u in resolved_urls:
+        clean_text = clean_text.replace(u, "").strip()
+    clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+    
+    if resolved_urls:
+        if not clean_text:
+            clean_text = "[User sent a GIF/Meme]"
+        else:
+            clean_text = f"{clean_text} [User sent a GIF/Meme]"
+            
+    return attachments_data, clean_text
 
 
 @bot.event
@@ -5149,8 +5327,8 @@ async def on_message(message):
             if ref_msg.id in command_output_message_ids:
                 is_reply_to_bot = False
                 is_reply_to_command_output = True
-            # 1. Embeds or components are always command outputs (e.g. ship, family, help, confessions)
-            elif ref_msg.embeds or ref_msg.components:
+            # 1. Rich embeds or components are command outputs (e.g. ship, family, help, confessions)
+            elif any(getattr(e, 'type', '') == 'rich' or e.fields or e.footer or e.author for e in ref_msg.embeds) or ref_msg.components:
                 is_reply_to_bot = False
                 is_reply_to_command_output = True
             else:
@@ -5255,39 +5433,15 @@ async def on_message(message):
     if user_id in grudge_list and current_time >= grudge_list[user_id]:
         del grudge_list[user_id]
 
-    # Clean the content
-    content = message.content
-    for mention in message.mentions:
-        content = content.replace(f"<@{mention.id}>", f"@{mention.display_name}").replace(f"<@!{mention.id}>", f"@{mention.display_name}")
-    clean_content = content.strip()
-
-    # --- ATTACHMENT ERROR HANDLING & STRICT LIMITS ---
+    # --- MEDIA RESOLUTION: Process direct attachments, Klipy/Tenor GIFs, embeds, and links ---
     MAX_FILES = bot_config.get('max_files_per_message', 3)
-    MAX_SIZE_MB = bot_config.get('max_file_size_mb', 8)
-    MAX_SIZE_BYTES = MAX_SIZE_MB * 1024 * 1024
-
     if len(message.attachments) > MAX_FILES:
         await message.reply(f"are you crazy? i'm not looking at {len(message.attachments)} files at once. keep it to {MAX_FILES} or less lol.")
         return
 
-    attachments_data = []
-    for attachment in message.attachments:
-        if attachment.size > MAX_SIZE_BYTES:
-            await message.reply(f"ew, that file is way too huge. keep it under {MAX_SIZE_MB}MB or i'm ignoring it.")
-            return
+    attachments_data, clean_content = await resolve_message_media(message)
 
-        # Strict Sanitization: If it's not a standard image, throw it out.
-        if attachment.content_type not in ALLOWED_MIME_TYPES:
-            await message.reply("what even is that format? just send a normal image or i'm ignoring it.")
-            return
-            
-        file_bytes = await attachment.read()
-        attachments_data.append({
-            "data": file_bytes,
-            "mime_type": attachment.content_type
-        })
-
-    # --- REPLY CONTEXT: Fetch referenced message content + images ---
+    # --- REPLY CONTEXT: Fetch referenced message content + images/GIFs ---
     reply_context = ""
     ref_image_note = ""
     bot_referenced_attachments = []
@@ -5300,31 +5454,19 @@ async def on_message(message):
                 ref_msg = None
         if isinstance(ref_msg, discord.Message):
             is_ref_bot = (ref_msg.author == bot.user)
+            ref_attachments, ref_clean = await resolve_message_media(ref_msg)
             if is_ref_bot:
-                ref_suffix = " (referencing the image you posted)" if ref_msg.attachments else ""
-                reply_context = f"[REPLYING TO YOUR PREVIOUS MESSAGE]: {ref_msg.content}{ref_suffix}"
-                # Grab images from Reze's message and pass as bot_referenced_attachments
-                # so Reze can see the image as HER OWN without mistaking it for a user upload
-                for att in ref_msg.attachments:
-                    if att.content_type in ALLOWED_MIME_TYPES and att.size <= MAX_SIZE_BYTES:
-                        try:
-                            file_bytes = await att.read()
-                            bot_referenced_attachments.append({"data": file_bytes, "mime_type": att.content_type})
-                        except:
-                            pass
+                ref_suffix = " (referencing the GIF/image you posted)" if ref_attachments else ""
+                reply_context = f"[REPLYING TO YOUR PREVIOUS MESSAGE]: {ref_clean}{ref_suffix}"
+                bot_referenced_attachments = ref_attachments
             else:
-                reply_context = f"[REPLYING TO {ref_msg.author.display_name}]: {ref_msg.content}"
-                # Grab images from replied-to message only when sent by someone else
-                for att in ref_msg.attachments:
-                    if att.content_type in ALLOWED_MIME_TYPES and att.size <= MAX_SIZE_BYTES and len(attachments_data) < MAX_FILES:
-                        try:
-                            file_bytes = await att.read()
-                            attachments_data.append({"data": file_bytes, "mime_type": att.content_type})
-                            ref_image_note = f"\n(Note: The image attached was sent by {ref_msg.author.display_name} in the message being replied to, not by {message.author.display_name}.)"
-                        except:
-                            pass
+                reply_context = f"[REPLYING TO {ref_msg.author.display_name}]: {ref_clean}"
+                # Grab media from replied-to message only when sent by someone else
+                if ref_attachments and len(attachments_data) < MAX_FILES:
+                    attachments_data.extend(ref_attachments[:MAX_FILES - len(attachments_data)])
+                    ref_image_note = f"\n(Note: The GIF/image attached was sent by {ref_msg.author.display_name} in the message being replied to, not by {message.author.display_name}.)"
 
-    # Don't return if they sent an image/video without text
+    # Don't return if they sent an image/GIF/video without text
     if not clean_content and not attachments_data and is_mentioned:
         await message.reply("what?")
         return
@@ -5340,7 +5482,7 @@ async def on_message(message):
 
 
     # Format the message for context (User Identity Parsing)
-    formatted_user_message = f"[{message.author.display_name}]: {message.clean_content}"
+    formatted_user_message = f"[{message.author.display_name}]: {clean_content}"
     if reply_context:
         formatted_user_message = f"{reply_context}\n{formatted_user_message}"
     if ref_image_note:
@@ -5633,10 +5775,14 @@ async def on_message(message):
                                 except:
                                     pass
                             if ref_msg and isinstance(ref_msg, discord.Message):
-                                reply_ref = f"[REPLYING TO {ref_msg.author.display_name}]: {ref_msg.clean_content}\n"
+                                h_ref = ref_msg.clean_content
+                                h_ref = re.sub(r'https?://(?:www\.)?(?:klipy\.(?:com|co)|tenor\.com|giphy\.com)/[^\s]+', '[GIF/Meme]', h_ref)
+                                reply_ref = f"[REPLYING TO {ref_msg.author.display_name}]: {h_ref}\n"
+                        h_text = msg.clean_content
+                        h_text = re.sub(r'https?://(?:www\.)?(?:klipy\.(?:com|co)|tenor\.com|giphy\.com)/[^\s]+', '[GIF/Meme]', h_text)
                         discord_history.append({
                             "role": "user",
-                            "content": f"{reply_ref}[{msg.author.display_name}]: {msg.clean_content}"
+                            "content": f"{reply_ref}[{msg.author.display_name}]: {h_text}"
                         })
                 # Reverse the list so it's in chronological order
                 discord_history.reverse()

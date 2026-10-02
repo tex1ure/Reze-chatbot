@@ -23,7 +23,7 @@ config = {
     "image_cooldown_min": 2,
     "image_cooldown_max": 4,
     "max_files_per_message": 3,
-    "max_file_size_mb": 8,
+    "max_file_size_mb": 12,
 
     # --- Human Behavior Probabilities (Always reply enabled) ---
     "left_on_read_react_chance": 0.0,
